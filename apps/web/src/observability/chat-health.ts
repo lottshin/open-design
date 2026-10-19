@@ -16,11 +16,8 @@
 //   client_chat_memory_pressure  "Who is about to OOM?"
 //   client_chat_stream_health    "How janky is the UI while a run streams?"
 //
-// Transport is `reportSafetyEvent` — the consent-bypassing direct-fetch
-// path that already carries `client_long_task`, `client_white_screen` and
-// `client_boot_timing`. Stability ground truth must not disappear when a
-// user opts out of product analytics; the reasoning is documented at the
-// top of `analytics/error-tracking.ts`.
+// Transport uses the fail-closed metrics-consent gate before the existing
+// envelope/validation path. No new health telemetry is sent while opted out.
 //
 // Cost discipline. Measurement must never become the jank it measures:
 //
@@ -51,7 +48,10 @@ import type {
   ChatStreamHealthProps,
 } from '@open-design/contracts/analytics';
 
-import { reportSafetyEvent } from '../analytics/error-tracking';
+import {
+  onResponsivenessConsent, reportResponsiveness,
+  responsivenessConsent, responsivenessVisible,
+} from './responsiveness';
 import {
   chatBreadcrumbTrail,
   chatCorrelation,
@@ -235,6 +235,7 @@ class ChatSurface implements ChatSurfaceHandle {
   private sampleTimer: ReturnType<typeof setInterval> | null = null;
 
   private longTaskObserver: PerformanceObserver | null = null;
+  private stopConsent: (() => void) | null = null;
   private activeRunId: string | null = null;
   private windowStartedAt = 0;
   private windowBlockedMs = 0;
@@ -269,7 +270,13 @@ class ChatSurface implements ChatSurfaceHandle {
       schedule(() => this.sample('interval'));
     }, SAMPLE_INTERVAL_MS);
 
-    this.installLongTaskObserver();
+    this.stopConsent = onResponsivenessConsent((enabled) => {
+      this.stopLongTaskObserver();
+      // Samples from an earlier grant must not escape after re-grant.
+      this.resetStreamWindow();
+      if (enabled) this.installLongTaskObserver();
+    });
+    if (responsivenessConsent()) this.installLongTaskObserver();
 
     if (typeof document !== 'undefined') {
       this.onVisibilityChange = () => {
@@ -288,6 +295,7 @@ class ChatSurface implements ChatSurfaceHandle {
   markFirstPaint(input: { renderedRowCount: number }): void {
     if (this.detached || this.paintReported) return;
     this.paintReported = true;
+    if (!responsivenessConsent()) return;
     pushChatBreadcrumb('first_paint');
     const props: ChatFirstPaintProps = {
       ...chatCorrelation(),
@@ -303,7 +311,7 @@ class ChatSurface implements ChatSurfaceHandle {
         ? { stream_event_count: this.streamEventCount }
         : {}),
     };
-    reportSafetyEvent('client_chat_first_paint', { ...props });
+    reportResponsiveness('client_chat_first_paint', { ...props });
   }
 
   setMessageCount(count: number): void {
@@ -321,7 +329,7 @@ class ChatSurface implements ChatSurfaceHandle {
   }
 
   sample(reason: ChatSampleReason): void {
-    if (this.detached) return;
+    if (this.detached || !responsivenessConsent()) return;
     const domNodeCount = this.countDescendants();
     const heap = readHeap();
 
@@ -347,7 +355,7 @@ class ChatSurface implements ChatSurfaceHandle {
           }
         : {}),
     };
-    reportSafetyEvent('client_chat_dom_growth', { ...props });
+    reportResponsiveness('client_chat_dom_growth', { ...props });
 
     if (heap) this.evaluateHeapPressure(heap, domNodeCount);
   }
@@ -363,7 +371,7 @@ class ChatSurface implements ChatSurfaceHandle {
     this.resetStreamWindow();
     if (this.streamTimer == null) {
       this.streamTimer = setInterval(() => {
-        if (this.activeRunId == null) return;
+        if (this.activeRunId == null || !responsivenessVisible()) return;
         this.flushStreamWindow(false);
         this.resetStreamWindow();
       }, STREAM_WINDOW_MS);
@@ -398,16 +406,22 @@ class ChatSurface implements ChatSurfaceHandle {
     if (this.streamTimer != null) clearInterval(this.streamTimer);
     this.sampleTimer = null;
     this.streamTimer = null;
+    this.stopConsent?.();
+    this.stopConsent = null;
+    this.stopLongTaskObserver();
+    if (activeSurface === this) activeSurface = null;
+  }
+
+  // -- internals ------------------------------------------------------------
+
+  private stopLongTaskObserver(): void {
     try {
       this.longTaskObserver?.disconnect();
     } catch {
       // best-effort — teardown must never propagate
     }
     this.longTaskObserver = null;
-    if (activeSurface === this) activeSurface = null;
   }
-
-  // -- internals ------------------------------------------------------------
 
   private installLongTaskObserver(): void {
     if (typeof PerformanceObserver === 'undefined') return;
@@ -416,7 +430,7 @@ class ChatSurface implements ChatSurfaceHandle {
       // Only tasks that land inside an open streaming window are ours.
       // Idle-time jank belongs to whatever else the app was doing and is
       // already covered by the global `client_long_task`.
-      if (this.activeRunId == null) return;
+      if (this.activeRunId == null || !responsivenessVisible()) return;
       for (const entry of list.getEntries()) {
         const duration = entry.duration;
         if (typeof duration !== 'number' || duration <= 0) continue;
@@ -464,7 +478,7 @@ class ChatSurface implements ChatSurfaceHandle {
       run_completed: runCompleted,
       details_count: this.element.getElementsByTagName('details').length,
     };
-    reportSafetyEvent('client_chat_stream_health', { ...props });
+    reportResponsiveness('client_chat_stream_health', { ...props });
   }
 
   private evaluateHeapPressure(heap: HeapSnapshot, domNodeCount: number): void {
@@ -493,7 +507,7 @@ class ChatSurface implements ChatSurfaceHandle {
       breadcrumbs: chatBreadcrumbTrail(),
       heap_trend_mb: chatHeapTrend(),
     };
-    reportSafetyEvent('client_chat_memory_pressure', { ...props });
+    reportResponsiveness('client_chat_memory_pressure', { ...props });
   }
 
   /**
