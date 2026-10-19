@@ -1,4 +1,4 @@
-import { recordIncomingUpdateLifecycle, type UpdateLifecycleObservation } from "./update-lifecycle-observations.js";
+import { recordIncomingUpdateStageResults, recordIncomingUpdateLifecycle, type UpdateLifecycleObservation } from "./update-lifecycle-observations.js";
 export { recordIncomingUpdateLifecycle, type UpdateLifecycleObservation } from "./update-lifecycle-observations.js";
 import { randomBytes } from "node:crypto";
 import { realpathSync } from "node:fs";
@@ -783,6 +783,11 @@ async function runDesktopMainWithTiming(
     );
   }
 
+  const readUpdateMetricsConsent = async (): Promise<boolean> => {
+    const base = await resolveDaemonBaseUrl(options)();
+    const response = await fetch(new URL("/api/analytics/config", base), { signal: AbortSignal.timeout(1000) });
+    return response.ok && (await response.json() as { enabled?: boolean }).enabled === true;
+  };
   const updater = createDesktopUpdater(
     {
       currentVersion: options.update?.currentVersion,
@@ -796,7 +801,12 @@ async function runDesktopMainWithTiming(
       runtimeBase: runtime.base,
       source: runtime.source,
     },
-    { openPath: (path) => shell.openPath(path) },
+    {
+      openPath: (path) => shell.openPath(path),
+      appSessionId: startupTiming.context().app_session_id,
+      osVersion: process.getSystemVersion(),
+      metricsConsent: readUpdateMetricsConsent,
+    },
   );
   // Resolve the namespace root the same way the daemon diagnostics export does
   // (apps/daemon/src/diagnostics-export.ts buildSidecarLogSources). In packaged
@@ -1067,6 +1077,13 @@ async function runDesktopMainWithTiming(
     onMainWindowReady: () => {
       startupTiming.mark("window_revealed");
       void recordIncomingUpdateLifecycle({ root: options.update?.installerObservationRoot, namespace: updater.config.namespace ?? "default", channel: updater.config.channel, version: updater.config.currentVersion }, { stage: "desktop_ready", outcome: "completed" });
+      void recordIncomingUpdateStageResults({
+        root: options.update?.installerObservationRoot, namespace: updater.config.namespace ?? "default",
+        channel: updater.config.channel, version: updater.config.currentVersion,
+        sessionId: startupTiming.context().app_session_id, osVersion: process.getSystemVersion(),
+        platform: process.platform, arch: process.arch,
+        metricsConsent: readUpdateMetricsConsent,
+      });
     },
     splashWindow: options.splashWindow,
     splashStartedAt: options.splashStartedAt,
