@@ -1,5 +1,6 @@
-import { recordUpdateLifecycle, type UpdateLifecycleObservation } from "./update-lifecycle-observations.js";
-import { createHash } from "node:crypto";
+import type { UpdateStageMetric } from '@open-design/contracts/analytics';
+import { recordUpdateStage, recordUpdateLifecycle, type UpdateLifecycleObservation } from "./update-lifecycle-observations.js";
+import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { createReadStream } from "node:fs";
 import {
@@ -38,6 +39,7 @@ import {
   type DesktopUpdateState,
 } from "@open-design/sidecar-proto";
 import {
+  installerObservationSummaryPath,
   markInstallerObservationOpenFailed,
   writePendingInstallerObservation,
   type InstallerObservationArtifactType,
@@ -137,6 +139,9 @@ import {
 const ARTIFACT_DOWNLOAD_MAX_ATTEMPTS = 3;
 
 export type DesktopUpdaterDeps = {
+  metricsConsent?: () => Promise<boolean>;
+  appSessionId?: string | null;
+  osVersion?: string | null;
   extractLauncherPayloadArchive?: (input: LauncherPayloadExtractInput) => Promise<void>;
   fetch?: typeof globalThis.fetch;
   launchAppAfterQuit?: (input: DeferredAppLaunchInput) => Promise<DeferredLaunchResult>;
@@ -159,6 +164,7 @@ export type LoadedRelease = {
 
 type ActionOptions = {
   autoDownload?: boolean;
+  trigger?: "manual" | "silent";
 };
 
 export type DesktopUpdater = {
@@ -167,7 +173,7 @@ export type DesktopUpdater = {
   config: DesktopUpdaterConfig;
   downloadUpdate(): Promise<DesktopUpdateStatusSnapshot>;
   handle(action: DesktopUpdateAction): Promise<DesktopUpdateStatusSnapshot>;
-  installUpdate(): Promise<DesktopUpdateStatusSnapshot>;
+  installUpdate(options?: ActionOptions): Promise<DesktopUpdateStatusSnapshot>;
   recordLifecycle?(event: UpdateLifecycleObservation): Promise<void>;
   shouldAutoCheck(): boolean;
   snapshot(): DesktopUpdateStatusSnapshot;
@@ -435,6 +441,69 @@ export function createDesktopUpdater(
   let installResult: DesktopUpdateStatusSnapshot["installResult"];
   let installFrozen = false;
   let observationHandle: InstallerObservationHandle | null = null;
+  let metricHandle: InstallerObservationHandle | null = null;
+  let metricTrigger: UpdateStageMetric['trigger'] = 'unknown';
+  const metricSessionId = deps.appSessionId ?? null;
+  let journalQueue = Promise.resolve();
+  let pendingJournalWrites = 0;
+  let metricFlowFailed = false;
+  const recordedStages = new Set<string>();
+
+  function beginMetricFlow(trigger: UpdateStageMetric['trigger']): void {
+    metricTrigger = trigger;
+    recordedStages.clear();
+    metricFlowFailed = false;
+    metricHandle = config.openDryRun || config.installerObservationRoot == null || config.namespace == null
+      ? null : { flowId: randomUUID(), summaryPath: '' };
+    if (metricHandle != null) metricHandle.summaryPath = installerObservationSummaryPath(config.installerObservationRoot!, metricHandle.flowId);
+  }
+
+  function metric(stage: UpdateStageMetric['stage'], result: UpdateStageMetric['result'], reason: UpdateStageMetric['reason_code'] = null): void {
+    const handle = metricHandle;
+    const key = `${stage}:${result === 'started' ? 'started' : 'result'}`;
+    if (handle == null || recordedStages.has(key) || pendingJournalWrites >= 32) return;
+    recordedStages.add(key);
+    if (result === 'failed' || result === 'cancelled') metricFlowFailed = true;
+    const checking = stage === 'check' && result !== 'success';
+    const release = stage === 'install_verify' || stage === 'install_open' || stage === 'restart'
+      ? activeRelease?.ref : candidate ?? activeRelease?.ref;
+    const artifact = checking ? null : installerObservationArtifactType(release?.artifact.type);
+    const event: UpdateStageMetric = { flow_id: handle.flowId, stage, result, reason_code: reason,
+      from_version: config.currentVersion, to_version: checking ? null : release?.version ?? null,
+      update_path: artifact == null ? null : artifact === 'payload' ? 'payload' : 'installer',
+      artifact_type: artifact, trigger: metricTrigger, duration_ms: null };
+    const context = { namespace: config.namespace!, sessionId: metricSessionId, channel: config.channel,
+      platform: config.platform, arch: config.arch, occurredAt: now().toISOString() };
+    pendingJournalWrites += 1;
+    // At most 32 pending writes; never await telemetry on the update/interaction path.
+    journalQueue = journalQueue.then(async () => {
+      if (deps.metricsConsent == null) return;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const enabled = await Promise.race([deps.metricsConsent(), new Promise<false>(resolve => {
+          timer = setTimeout(() => resolve(false), 1000);
+        })]);
+        if (enabled === true) await recordUpdateStage(handle, event, { ...context, osVersion: deps.osVersion ?? null });
+      } finally { if (timer != null) clearTimeout(timer); }
+    }).catch(() => undefined)
+      .finally(() => { pendingJournalWrites -= 1; });
+  }
+
+  async function observedStage(stage: UpdateStageMetric['stage'], run: () => Promise<DesktopUpdateStatusSnapshot>): Promise<DesktopUpdateStatusSnapshot> {
+    metric(stage, 'started');
+    try {
+      const result = await run();
+      const failed = result.error != null || result.state === DESKTOP_UPDATE_STATES.ERROR;
+      metric(stage, failed ? 'failed' : 'success', failed
+        ? stage === 'check' ? 'check_failed' : stage === 'download' ? 'download_failed' : 'install_open_failed' : null);
+      return result;
+    } catch (error) {
+      metric(stage, error instanceof Error && error.name === 'AbortError' ? 'cancelled' : 'failed',
+        error instanceof Error && error.name === 'AbortError' ? 'cancelled' : 'operation_failed');
+      throw error;
+    }
+  }
+
   let lifecycleSummary: DesktopUpdateCacheLifecycleSummary | undefined;
   let progress: DesktopUpdateProgressSnapshot | undefined;
   let reinstallRequirement: DesktopUpdateReinstallSnapshot | undefined;
@@ -734,6 +803,28 @@ export function createDesktopUpdater(
   }
 
   async function checkForCandidate(options: ActionOptions = {}): Promise<DesktopUpdateStatusSnapshot> {
+    if (!supported() || installFrozen || installResult != null) return await checkForCandidateRaw();
+    const previous = metricHandle != null && !metricFlowFailed ? {
+      handle: metricHandle, trigger: metricTrigger, stages: [...recordedStages],
+      version: activeRelease?.ref.version ?? candidate?.version,
+    } : null;
+    beginMetricFlow(options.trigger ?? 'manual');
+    const checked = await observedStage('check', checkForCandidateRaw);
+    // A polling check gets its own denominator, but must not detach an already
+    // downloaded/available release from the flow that produced it.
+    if (previous?.version != null && checked.error == null &&
+        previous.version === (candidate?.version ?? activeRelease?.ref.version)) {
+      metricHandle = previous.handle;
+      metricTrigger = previous.trigger;
+      recordedStages.clear();
+      for (const stage of previous.stages) recordedStages.add(stage);
+      metricFlowFailed = false;
+    }
+    if (checked.error == null && (options.autoDownload ?? config.autoDownload) && candidate != null) return await downloadUpdate();
+    return checked;
+  }
+
+  async function checkForCandidateRaw(): Promise<DesktopUpdateStatusSnapshot> {
     const unsupported = unsupportedStatus();
     if (unsupported != null) return unsupported;
     if (installFrozen || installResult != null) return snapshot();
@@ -849,9 +940,9 @@ export function createDesktopUpdater(
       const available = activeRelease == null
         ? setState(DESKTOP_UPDATE_STATES.AVAILABLE)
         : setState(DESKTOP_UPDATE_STATES.DOWNLOADED);
-      if (options.autoDownload ?? config.autoDownload) return await downloadUpdate();
       return available;
     } catch (checkError) {
+      if (checkError instanceof Error && checkError.name === 'AbortError') metric('check', 'cancelled', 'cancelled');
       return setFailurePreservingActive(
         createError("metadata-unreachable", checkError instanceof Error ? checkError.message : String(checkError)),
       );
@@ -859,6 +950,20 @@ export function createDesktopUpdater(
   }
 
   async function downloadUpdate(): Promise<DesktopUpdateStatusSnapshot> {
+    if (!supported()) return await downloadUpdateRaw();
+    if (installFrozen || installResult != null) return snapshot();
+    if (candidate == null) {
+      const checked = await checkForCandidate({ autoDownload: false });
+      if (candidate == null || checked.error != null) return checked;
+    }
+    if (activeRelease != null && releaseMatchesCandidate(activeRelease.ref, candidate)) return snapshot();
+    if (metricHandle == null || recordedStages.has('download:result')) beginMetricFlow(metricTrigger);
+    const downloaded = await observedStage('download', downloadUpdateRaw);
+    if (config.autoOpen && downloaded.error == null && activeRelease != null) return await installUpdate({ trigger: 'silent' });
+    return downloaded;
+  }
+
+  async function downloadUpdateRaw(): Promise<DesktopUpdateStatusSnapshot> {
     const unsupported = unsupportedStatus();
     if (unsupported != null) return unsupported;
     if (installFrozen || installResult != null) return snapshot();
@@ -921,31 +1026,42 @@ export function createDesktopUpdater(
       if (!containsPath(opened.root.realRoot, tmpPath)) {
         return await failDownload(createError("download-path-escaped", "resolved update download path escaped update root"));
       }
-      const resolvedChecksum = await resolveChecksum(fetchImpl, nextCandidate.checksum);
-      await downloadCopyAndClear({
-        basePath: downloadsRoot,
-        bucket: "package-launcher",
-        fetch: fetchImpl,
-        fileName: outputName,
-        maxAttempts: ARTIFACT_DOWNLOAD_MAX_ATTEMPTS,
-        onProgress: (nextProgress) => {
-          progress = updateProgressFromManaged(nextProgress);
-          emit();
-        },
-        outputPath: tmpPath,
-        payload: {
-          checksum: managedChecksum(resolvedChecksum),
-          url: nextCandidate.artifact.url,
-        },
-      });
-      const digest = await hashFile(tmpPath, resolvedChecksum.algorithm);
-      if (resolvedChecksum.value == null || digest.toLowerCase() !== resolvedChecksum.value.toLowerCase()) {
-        return await failDownload(
-          createError("checksum-mismatch", "downloaded update checksum did not match release metadata", {
-            actual: digest,
-            expected: resolvedChecksum.value,
-          }),
-        );
+      metric('verify', 'started');
+      let resolvedChecksum: DesktopUpdateChecksumSnapshot;
+      try {
+        resolvedChecksum = await resolveChecksum(fetchImpl, nextCandidate.checksum);
+        await downloadCopyAndClear({
+          basePath: downloadsRoot,
+          bucket: "package-launcher",
+          fetch: fetchImpl,
+          fileName: outputName,
+          maxAttempts: ARTIFACT_DOWNLOAD_MAX_ATTEMPTS,
+          onProgress: (nextProgress) => {
+            progress = updateProgressFromManaged(nextProgress);
+            emit();
+          },
+          outputPath: tmpPath,
+          payload: {
+            checksum: managedChecksum(resolvedChecksum),
+            url: nextCandidate.artifact.url,
+          },
+        });
+        const digest = await hashFile(tmpPath, resolvedChecksum.algorithm);
+        if (resolvedChecksum.value == null || digest.toLowerCase() !== resolvedChecksum.value.toLowerCase()) {
+          metric("verify", "failed", "checksum_mismatch");
+          return await failDownload(
+            createError("checksum-mismatch", "downloaded update checksum did not match release metadata", {
+              actual: digest,
+              expected: resolvedChecksum.value,
+            }),
+          );
+        }
+        metric('verify', 'success');
+      } catch (verificationError) {
+        const checksumMismatch = verificationError instanceof ManagedDownloadError && verificationError.code === MANAGED_DOWNLOAD_ERROR_CODES.CHECKSUM_MISMATCH;
+        const cancelled = verificationError instanceof Error && verificationError.name === 'AbortError';
+        metric('verify', cancelled ? 'cancelled' : checksumMismatch ? 'failed' : 'unknown', cancelled ? 'cancelled' : checksumMismatch ? 'checksum_mismatch' : 'download_incomplete');
+        throw verificationError;
       }
       const key = releaseKey(nextCandidate, resolvedChecksum);
       const releaseDir = join(releasesRoot, key);
@@ -1033,9 +1149,9 @@ export function createDesktopUpdater(
         });
       }
       const downloaded = setState(DESKTOP_UPDATE_STATES.DOWNLOADED);
-      if (config.autoOpen) return await installUpdate();
       return downloaded;
     } catch (downloadError) {
+      if (downloadError instanceof Error && downloadError.name === 'AbortError') metric('download', 'cancelled', 'cancelled');
       if (stagingDir != null) await rm(stagingDir, { force: true, recursive: true }).catch(() => undefined);
       incomingRelease = null;
       progress = undefined;
@@ -1045,7 +1161,6 @@ export function createDesktopUpdater(
   }
 
   async function writeInstallObservation(attemptedAt: string): Promise<InstallerObservationHandle | null> {
-    observationHandle = null;
     if (config.openDryRun) return null;
     if (config.installerObservationRoot == null || config.namespace == null) return null;
     if (activeRelease == null) return null;
@@ -1053,6 +1168,7 @@ export function createDesktopUpdater(
     if (artifactType == null) return null;
     try {
       observationHandle = await writePendingInstallerObservation({
+        flowId: metricHandle?.flowId,
         arch: activeRelease.ref.arch,
         artifactType,
         attemptedAt,
@@ -1121,7 +1237,15 @@ export function createDesktopUpdater(
     return { ...result, launchPath };
   }
 
-  async function installUpdate(): Promise<DesktopUpdateStatusSnapshot> {
+  async function installUpdate(options: ActionOptions = {}): Promise<DesktopUpdateStatusSnapshot> {
+    if (!supported()) return await installUpdateRaw();
+    if (installResult != null) return snapshot();
+    if (metricHandle == null || metricFlowFailed || recordedStages.has('install_open:result')) beginMetricFlow(options.trigger ?? 'manual');
+    metricTrigger = options.trigger ?? 'manual';
+    return await installUpdateRaw();
+  }
+
+  async function installUpdateRaw(): Promise<DesktopUpdateStatusSnapshot> {
     const unsupported = unsupportedStatus();
     if (unsupported != null) return unsupported;
     if (installResult != null) {
@@ -1141,20 +1265,24 @@ export function createDesktopUpdater(
       return setState(DESKTOP_UPDATE_STATES.ERROR, createError("download-path-escaped", "download path is outside the update root"));
     }
     setState(DESKTOP_UPDATE_STATES.INSTALLING);
+    metric('install_verify', 'started');
     const installChecksum = activeRelease.ref.checksum;
     if (installChecksum?.value == null) {
+      metric("install_verify", "failed", "verification_failed");
       return setState(DESKTOP_UPDATE_STATES.ERROR, createError("checksum-missing", "downloaded update checksum is missing"));
     }
     let digest: string;
     try {
       digest = await hashFile(resolvedDownload, installChecksum.algorithm);
     } catch (hashError) {
+      metric("install_verify", "failed", "verification_failed");
       return setState(
         DESKTOP_UPDATE_STATES.ERROR,
         createError("download-unavailable", hashError instanceof Error ? hashError.message : String(hashError)),
       );
     }
     if (digest.toLowerCase() !== installChecksum.value.toLowerCase()) {
+      metric("install_verify", "failed", "checksum_mismatch");
       return setState(
         DESKTOP_UPDATE_STATES.ERROR,
         createError("checksum-mismatch", "downloaded update checksum changed before install", {
@@ -1163,6 +1291,8 @@ export function createDesktopUpdater(
         }),
       );
     }
+    metric("install_verify", "success");
+    metric("install_open", "started");
     if (activeRelease.ref.artifact.type === "payload") {
       let observation: InstallerObservationHandle | null = null;
       try {
@@ -1181,9 +1311,12 @@ export function createDesktopUpdater(
           activation.runtime.active ?? undefined,
         );
         if (relaunch.error != null && relaunch.error.length > 0) {
+          metric("install_open", "failed", "install_open_failed");
           await markInstallObservationOpenFailed(observation, now().toISOString());
           return setState(DESKTOP_UPDATE_STATES.ERROR, createError("payload-relaunch-failed", relaunch.error));
         }
+        metric("install_open", "success");
+        metric("restart", "started");
         installFrozen = true;
         installResult = {
           activeVersion: activeRelease.ref.version,
@@ -1206,6 +1339,7 @@ export function createDesktopUpdater(
         });
         return setState(DESKTOP_UPDATE_STATES.DOWNLOADED);
       } catch (applyError) {
+        metric("install_open", "failed", "install_open_failed");
         await markInstallObservationOpenFailed(observation, now().toISOString());
         return setState(
           DESKTOP_UPDATE_STATES.ERROR,
@@ -1220,10 +1354,13 @@ export function createDesktopUpdater(
       if (!config.openDryRun) {
         const openError = await requestInstallerOpen(resolvedDownload, opened.root.realRoot);
         if (openError.length > 0) {
+          metric("install_open", "failed", "install_open_failed");
           await markInstallObservationOpenFailed(observation, now().toISOString());
           return setState(DESKTOP_UPDATE_STATES.ERROR, createError("open-installer-failed", openError));
         }
       }
+      metric("install_open", "success");
+      metric("restart", "started");
       installResult = {
         ...(config.openDryRun ? { dryRun: true } : {}),
         openedAt,
@@ -1241,6 +1378,7 @@ export function createDesktopUpdater(
       });
       return setState(DESKTOP_UPDATE_STATES.DOWNLOADED);
     } catch (installError) {
+      metric("install_open", "failed", "install_open_failed");
       await markInstallObservationOpenFailed(observation, now().toISOString());
       return setState(
         DESKTOP_UPDATE_STATES.ERROR,
@@ -1354,7 +1492,7 @@ export function createDesktopUpdater(
           return this.installUpdate();
       }
     },
-    installUpdate: () => serialized(installUpdate),
+    installUpdate: (options) => serialized(() => installUpdate(options)),
     recordLifecycle: (event) => recordUpdateLifecycle(installResult != null ? observationHandle : null, event),
     shouldAutoCheck: () => config.enabled && config.autoCheck,
     snapshot,

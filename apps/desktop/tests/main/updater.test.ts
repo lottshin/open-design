@@ -1706,7 +1706,7 @@ describe("desktop updater", () => {
     }
   });
 
-  it("relaunches mac launcher payloads through the prepared payload executable", async () => {
+  it.each(["manual", "silent"] as const)("relaunches mac launcher payloads through the prepared payload executable (%s)", async (trigger) => {
     const root = makeRoot();
     const observationRoot = join(root, "observations", "installer");
     const fixture = await createUpdaterFixture({
@@ -1751,6 +1751,7 @@ describe("desktop updater", () => {
         namespace: "release-beta",
         source: SIDECAR_SOURCES.PACKAGED,
       }, {
+        metricsConsent: async () => true,
         extractLauncherPayloadArchive: async ({ destinationRoot }) => {
           await mkdir(join(destinationRoot, "payload", "Open Design Beta.app", "Contents", "MacOS"), { recursive: true });
           await mkdir(join(destinationRoot, "payload", "Open Design Beta.app", "Contents", "Resources", "open-design"), { recursive: true });
@@ -1784,13 +1785,13 @@ describe("desktop updater", () => {
         processPid: 4243,
       });
 
-      const checked = await updater.checkForUpdates();
+      const checked = await updater.checkForUpdates({ trigger });
       expect(checked.artifact?.type).toBe("payload");
       expect(checked.capabilities.canApplyInPlace).toBe(true);
       expect(checked.capabilities.canOpenInstaller).toBe(false);
       expect(checked.capabilities.requiresManualInstall).toBe(false);
 
-      const installed = await updater.installUpdate();
+      const installed = await updater.installUpdate({ trigger });
 
       expect(installed.state).toBe(DESKTOP_UPDATE_STATES.DOWNLOADED);
       expect(installed.installResult?.path).toBe(checked.downloadPath);
@@ -1820,6 +1821,12 @@ describe("desktop updater", () => {
       const observation = JSON.parse(
         await readFile(join(observationRoot, flowIds[0] ?? "", "summary.json"), "utf8"),
       ) as Record<string, unknown>;
+      await vi.waitFor(async () => {
+        const stages = join(observationRoot, flowIds[0] ?? "", "stages");
+        expect(JSON.parse(await readFile(join(stages, "check-started.json"), "utf8"))).toMatchObject({ flow_id: flowIds[0], result: "started" });
+        expect(JSON.parse(await readFile(join(stages, "install_open-result.json"), "utf8"))).toMatchObject({ flow_id: flowIds[0], update_path: "payload", result: "success", trigger });
+        expect(JSON.parse(await readFile(join(stages, "restart-started.json"), "utf8"))).toMatchObject({ flow_id: flowIds[0], stage: "restart" });
+      });
       expect(observation).toMatchObject({
         artifactType: "payload",
         fromVersion: "1.0.0-beta.2",
@@ -3926,4 +3933,110 @@ describe("desktop updater", () => {
     }
   });
 
+});
+
+it('journals failed checks with an independent denominator and fresh flow on retry', async () => {
+  const root = makeRoot();
+  const observationRoot = join(root, 'observations', 'installer');
+  const updater = createDesktopUpdater({
+    arch: 'arm64', downloadRoot: join(root, 'updates'),
+    env: { ...updaterEnv('https://fixture.invalid/metadata.json'), [DESKTOP_UPDATE_ENV.OPEN_DRY_RUN]: '0' },
+    installerObservationRoot: observationRoot, namespace: 'release', source: SIDECAR_SOURCES.TOOLS_PACK,
+  }, { metricsConsent: async () => true, fetch: vi.fn(async () => { throw new Error('/private/network-secret'); }), logger: { warn: vi.fn(), error: vi.fn(), info: vi.fn() } });
+  try {
+    await updater.checkForUpdates();
+    await updater.checkForUpdates();
+    await vi.waitFor(async () => expect(await readdir(observationRoot)).toHaveLength(2));
+    for (const flowId of await readdir(observationRoot)) {
+      const events = await Promise.all(['started', 'result'].map(async phase => JSON.parse(await readFile(join(observationRoot, flowId, 'stages', `check-${phase}.json`), 'utf8'))));
+      expect(events[0]).toMatchObject({ flow_id: flowId, stage: 'check', result: 'started', to_version: null });
+      expect(events[1]).toMatchObject({ flow_id: flowId, stage: 'check', result: 'failed', reason_code: 'check_failed' });
+      expect(JSON.stringify(events)).not.toContain('/private');
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+it.each(['manual', 'silent'] as const)('correlates %s installer stages and isolates check, download, checksum and open failures', async trigger => {
+  for (const fault of ['none', 'network', 'checksum', 'open'] as const) {
+    const root = makeRoot();
+    const fixture = await createUpdaterFixture();
+    const observationRoot = join(root, 'observations', 'installer');
+    const updater = createDesktopUpdater({
+      arch: 'arm64', downloadRoot: join(root, 'updates'),
+      env: { ...updaterEnv(fixture.metadataUrl), [DESKTOP_UPDATE_ENV.OPEN_DRY_RUN]: '0', [DESKTOP_UPDATE_ENV.AUTO_OPEN]: trigger === 'silent' ? '1' : '0' },
+      installerObservationRoot: observationRoot, namespace: 'release', source: SIDECAR_SOURCES.TOOLS_PACK,
+    }, {
+      metricsConsent: async () => true,
+      fetch: async (url, init) => {
+        if (fault === 'network' && String(url).endsWith('/artifact.dmg')) throw new Error('offline');
+        if (fault === 'checksum' && String(url).endsWith('.sha256')) return new Response('0'.repeat(64));
+        return await fetch(url, init);
+      },
+      launchInstallerAfterQuit: async () => fault === 'open' ? 'fixture refused launch' : '',
+    });
+    try {
+      const checked = await updater.checkForUpdates({ trigger });
+      if ((fault === 'none' || fault === 'open') && checked.installResult == null && checked.error == null) await updater.installUpdate({ trigger });
+      await vi.waitFor(async () => {
+        const [flow] = await readdir(observationRoot);
+        const folder = join(observationRoot, flow!, 'stages');
+        const check = JSON.parse(await readFile(join(folder, 'check-result.json'), 'utf8'));
+        expect(check).toMatchObject({ stage: 'check', result: 'success', trigger });
+        const download = JSON.parse(await readFile(join(folder, 'download-result.json'), 'utf8'));
+        expect(download.result).toBe(fault === 'network' || fault === 'checksum' ? 'failed' : 'success');
+        const verify = JSON.parse(await readFile(join(folder, 'verify-result.json'), 'utf8'));
+        expect(verify.result).toBe(fault === 'checksum' ? 'failed' : fault === 'network' ? 'unknown' : 'success');
+        if (fault === 'none' || fault === 'open') {
+          const open = JSON.parse(await readFile(join(folder, 'install_open-result.json'), 'utf8'));
+          const summary = JSON.parse(await readFile(join(observationRoot, flow!, 'summary.json'), 'utf8'));
+          expect(open).toMatchObject({ flow_id: summary.flowId, update_path: 'installer', trigger, result: fault === 'open' ? 'failed' : 'success' });
+          if (fault === 'none') expect(JSON.parse(await readFile(join(folder, 'restart-started.json'), 'utf8'))).toMatchObject({ result: 'started' });
+          else expect(await readdir(folder)).not.toContain('restart-started.json');
+        } else expect(checked.error).toBeDefined();
+      });
+    } finally { await fixture.close(); rmSync(root, { recursive: true, force: true }); }
+  }
+});
+
+it.each([false, null] as const)('does not journal metrics with disabled or unavailable consent (%s)', async consent => {
+  const root = makeRoot();
+  const observationRoot = join(root, 'observations', 'installer');
+  try {
+    const updater = createDesktopUpdater({
+      arch: 'arm64', downloadRoot: join(root, 'updates'),
+      env: { ...updaterEnv('https://fixture.invalid/metadata.json'), [DESKTOP_UPDATE_ENV.OPEN_DRY_RUN]: '0' },
+      installerObservationRoot: observationRoot, namespace: 'release', source: SIDECAR_SOURCES.TOOLS_PACK,
+    }, { metricsConsent: async () => { if (consent === null) throw new Error('unavailable'); return consent; },
+      fetch: async () => { throw new Error('offline'); }, logger: { warn: vi.fn(), error: vi.fn() } });
+    expect((await updater.checkForUpdates()).error?.code).toBe('metadata-unreachable');
+    expect(existsSync(observationRoot)).toBe(false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+it('keeps a downloaded release on its original flow after a polling check', async () => {
+  const root = makeRoot();
+  const fixture = await createUpdaterFixture();
+  const observationRoot = join(root, 'observations', 'installer');
+  try {
+    const updater = createDesktopUpdater({ arch: 'arm64', downloadRoot: join(root, 'updates'),
+      env: { ...updaterEnv(fixture.metadataUrl), [DESKTOP_UPDATE_ENV.OPEN_DRY_RUN]: '0' },
+      installerObservationRoot: observationRoot, namespace: 'release', source: SIDECAR_SOURCES.TOOLS_PACK,
+    }, { metricsConsent: async () => true, launchInstallerAfterQuit: async () => '' });
+    await updater.checkForUpdates({ trigger: 'silent' });
+    await updater.checkForUpdates({ trigger: 'silent' });
+    await updater.installUpdate({ trigger: 'manual' });
+    await updater.installUpdate({ trigger: 'manual' });
+    await vi.waitFor(async () => {
+      const flows = await readdir(observationRoot);
+      expect(flows).toHaveLength(2);
+      const records = await Promise.all(flows.map(async flow => ({ flow, files: await readdir(join(observationRoot, flow, 'stages')) })));
+      const updateFlow = records.find(record => record.files.includes('download-started.json'))!;
+      expect(updateFlow.files).toContain('install_open-result.json');
+      expect(updateFlow.files.filter(file => file.startsWith('install_open'))).toHaveLength(2);
+      const summary = JSON.parse(await readFile(join(observationRoot, updateFlow.flow, 'summary.json'), 'utf8'));
+      expect(summary.flowId).toBe(updateFlow.flow);
+      const opened = JSON.parse(await readFile(join(observationRoot, updateFlow.flow, 'stages/install_open-result.json'), 'utf8'));
+      expect(opened.trigger).toBe('manual');
+    });
+  } finally { await fixture.close(); rmSync(root, { recursive: true, force: true }); }
 });
