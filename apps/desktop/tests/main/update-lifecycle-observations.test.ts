@@ -52,7 +52,7 @@ it.each(['installer', 'payload'] as const)('closes %s restart only after a diffe
       artifact_type: artifact, trigger, duration_ms: null,
     }, { namespace: 'test', sessionId: 'previous-desktop', osVersion: null, channel: 'prerelease', platform: 'darwin', arch: 'arm64', occurredAt: started.toISOString() });
     const input = { root, namespace: 'test', channel: 'prerelease', version: outcome === 'success' ? toVersion : outcome === 'unknown' ? '2.0.0' : '1.0.0',
-      sessionId: 'previous-desktop', osVersion: null, platform: 'darwin', arch: 'arm64', metricsConsent: async () => true };
+      sessionId: 'previous-desktop', osVersion: null, platform: 'darwin', arch: 'arm64' };
     await recordIncomingUpdateStageResults(input);
     const resultPath = join(root, handle.flowId, 'stages/restart-result.json');
     await expect(readFile(resultPath)).rejects.toMatchObject({ code: 'ENOENT' });
@@ -66,10 +66,9 @@ it.each(['installer', 'payload'] as const)('closes %s restart only after a diffe
     expect(await readFile(resultPath, 'utf8')).toBe(first);
   }
 });
-it('does not close restart while incoming desktop consent is unavailable', async () => {
+it('does not fail startup when no incoming restart journal exists', async () => {
   const { root } = await fixture();
   await expect(recordIncomingUpdateStageResults({ root, namespace: 'test', channel: 'prerelease', version: '1.0.1',
     sessionId: 'new-desktop', osVersion: null, platform: 'darwin', arch: 'arm64',
-    metricsConsent: async () => { throw new Error('unavailable'); },
   })).resolves.toBeUndefined();
 });

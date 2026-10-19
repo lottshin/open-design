@@ -41,7 +41,7 @@ import {
   isProcessExitEventName,
   processExitMetricFields,
 } from '@open-design/contracts/analytics';
-import { readAppConfig, readMetricsConsent } from './app-config.js';
+import { readAppConfig } from './app-config.js';
 import { readTelemetryEnvironment } from './telemetry-environment.js';
 import { normalizeTelemetryAppVersion, readCurrentAppVersionInfo, resolveAppVersionInfo } from './app-version.js';
 
@@ -463,8 +463,7 @@ export function createAnalyticsService(args: {
       }
     },
     captureSafety: async ({ eventName, distinctId, appVersion, properties, insertId }) => {
-      // Structural process-exit/launch/memory metrics honor usage consent,
-      // including the legacy exit carriers. Other safety events retain their policy.
+      // No consent re-check here: all stability events use the safety channel.
       // We still fall back gracefully when the installationId is missing
       // (cold start before the daemon has stamped one in app-config) by
       // synthesizing an anonymous distinct id rooted at the process boot.
@@ -477,9 +476,6 @@ export function createAnalyticsService(args: {
       // See codex review on PR #2527 (Siri-Ray) for the original race.
       const resolvedInsertId = insertId ?? randomInsertId();
       try {
-        if (isClientMetricEventName(eventName) || isProcessExitEventName(eventName)) {
-          if (!(await readMetricsConsent(args.dataDir)).metrics) return;
-        }
         const resolvedDistinctId =
           distinctId && distinctId.length > 0
             ? distinctId

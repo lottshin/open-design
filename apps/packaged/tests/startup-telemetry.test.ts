@@ -33,9 +33,10 @@ import {
   reportLaunchEvent,
 } from '../src/startup-telemetry.js';
 
-const consentRoot = mkdtempSync(join(tmpdir(), 'od-startup-consent-'));
-writeFileSync(join(consentRoot, 'app-config.json'), JSON.stringify({ telemetry: { metrics: true } }));
-afterAll(() => rmSync(consentRoot, { recursive: true, force: true }));
+const optedOutRoot = mkdtempSync(join(tmpdir(), 'od-startup-consent-'));
+// Startup safety delivery must also work with product analytics disabled.
+writeFileSync(join(optedOutRoot, 'app-config.json'), JSON.stringify({ telemetry: { metrics: false } }));
+afterAll(() => rmSync(optedOutRoot, { recursive: true, force: true }));
 
 describe('launch timing transport', () => {
   it('preserves occurrence identity/time and does not invent an installation identity', async () => {
@@ -51,7 +52,7 @@ describe('launch timing transport', () => {
     const root = mkdtempSync(join(tmpdir(), 'od-launch-identity-'));
     try {
       writeFileSync(join(root, 'installation.json'), JSON.stringify({ installationId: 'installation-1' }));
-      await reportLaunchEvent({ dataRoot: consentRoot, ...args, installationRoot: root }, { fetchImpl, now: () => '2026-10-16T00:00:02.000Z' });
+      await reportLaunchEvent({ dataRoot: optedOutRoot, ...args, installationRoot: root }, { fetchImpl, now: () => '2026-10-16T00:00:02.000Z' });
       const body = JSON.parse(String(fetchImpl.mock.calls[0]?.[1]?.body));
       expect(body.properties).toMatchObject({ event_schema_version: 4, client_type: 'desktop' });
       expect(parseClientMetricEvent(body.event, body.properties)).not.toBeNull();
@@ -377,7 +378,7 @@ describe('reportStartupFailure', () => {
     const fetchImpl = vi.fn().mockResolvedValue(new Response('ok'));
     await reportStartupFailure(
       {
-        dataRoot: consentRoot,
+        dataRoot: optedOutRoot,
         error: new Error(DAEMON_EXIT_MESSAGE),
         isPathAccess: false,
         posthogKey: 'phc_test',
@@ -410,7 +411,7 @@ describe('reportStartupFailure', () => {
     await expect(
       reportStartupFailure(
         {
-        dataRoot: consentRoot,
+        dataRoot: optedOutRoot,
           error: new Error(DAEMON_EXIT_MESSAGE),
           isPathAccess: false,
           posthogKey: 'phc_test',
@@ -434,7 +435,7 @@ describe('reportStartupFailure', () => {
     const fetchImpl = vi.fn();
     await reportStartupFailure(
       {
-        dataRoot: consentRoot,
+        dataRoot: optedOutRoot,
         error: new Error(DAEMON_EXIT_MESSAGE),
         isPathAccess: false,
         posthogKey: null,
@@ -463,7 +464,7 @@ describe('reportStartupFailure', () => {
     error.stack = `${error.message}\n    at file:///Users/liudetao/App/Contents/Resources/app/prebundled/daemon/server.mjs:1:1`;
     await reportStartupFailure(
       {
-        dataRoot: consentRoot,
+        dataRoot: optedOutRoot,
         error,
         isPathAccess: false,
         posthogKey: 'phc_test',
@@ -497,7 +498,7 @@ describe('reportStartupFailure', () => {
     const fetchImpl = vi.fn().mockResolvedValue(new Response('ok'));
     await reportStartupFailure(
       {
-        dataRoot: consentRoot,
+        dataRoot: optedOutRoot,
         error: new Error('boom'),
         isPathAccess: false,
         posthogKey: 'phc_test',
@@ -572,7 +573,7 @@ SqliteError: database disk image is malformed
     });
     await reportStartupFailure(
       {
-        dataRoot: consentRoot,
+        dataRoot: optedOutRoot,
         error: spawnError,
         isPathAccess: false,
         posthogKey: 'phc_test',
@@ -601,7 +602,7 @@ SqliteError: database disk image is malformed
     delete (empty as { stack?: string }).stack;
     await reportStartupFailure(
       {
-        dataRoot: consentRoot,
+        dataRoot: optedOutRoot,
         error: empty,
         isPathAccess: false,
         posthogKey: 'phc_test',
@@ -624,7 +625,7 @@ SqliteError: database disk image is malformed
     const fetchImpl = vi.fn().mockResolvedValue(new Response('ok'));
     await reportStartupFailure(
       {
-        dataRoot: consentRoot,
+        dataRoot: optedOutRoot,
         error: new Error(DAEMON_EXIT_MESSAGE),
         isPathAccess: false,
         posthogKey: 'phc_test',
@@ -680,7 +681,7 @@ describe('errno triplet privacy', () => {
     });
     await reportStartupFailure(
       {
-        dataRoot: consentRoot,
+        dataRoot: optedOutRoot,
         error: err,
         isPathAccess: false,
         posthogKey: 'phc_test',
@@ -733,7 +734,7 @@ describe('daemon_log_tail (unparseable log recovery)', () => {
     const fetchImpl = vi.fn().mockResolvedValue(new Response('ok'));
     await reportStartupFailure(
       {
-        dataRoot: consentRoot,
+        dataRoot: optedOutRoot,
         error: new Error(DAEMON_EXIT_MESSAGE),
         isPathAccess: false,
         posthogKey: 'phc_test',
@@ -807,7 +808,7 @@ describe('daemon_log_tail (unparseable log recovery)', () => {
   });
 });
 
-it.each(['false', 'corrupt', 'unavailable'])('does not report startup exits when metrics consent is %s', async state => {
+it.each(['false', 'corrupt', 'unavailable'])('reports startup exits when metrics consent is %s', async state => {
   const root = mkdtempSync(join(tmpdir(), 'od-exit-consent-'));
   const fetchImpl = vi.fn();
   try {
@@ -815,13 +816,17 @@ it.each(['false', 'corrupt', 'unavailable'])('does not report startup exits when
     await reportStartupFailure({ dataRoot: state === 'unavailable' ? null : root, error: new Error('daemon failed'),
       isPathAccess: false, posthogKey: 'phc_test', posthogHost: null, distinctId: 'installation-1',
       appVersion: '1.0.0', namespace: 'test', source: 'packaged' }, { fetchImpl });
-    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    const payloads = fetchImpl.mock.calls.map(([, init]) => JSON.parse(init.body));
+    const exit = payloads.find(p => p.event === 'client_process_exit');
+    expect(exit).toBeDefined();
+    for (const key of ['path', 'url', 'content', 'prompt', 'pid', 'error_message']) expect(exit.properties).not.toHaveProperty(key);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 it.each(['daemon', 'web'])('correlates injected %s startup failure with its launch and emits a private-data-free exit metric', async role => {
   const fetchImpl = vi.fn().mockResolvedValue(new Response('ok'));
-  await reportStartupFailure({ dataRoot: consentRoot,
+  await reportStartupFailure({ dataRoot: optedOutRoot,
     error: new Error(`daemon exited before reporting status (code=1, signal=none); see /private/${role}/latest.log for details`),
     isPathAccess: false, posthogKey: 'phc_test', posthogHost: null, distinctId: 'installation-1',
     appVersion: '1.0.0-beta.1', namespace: 'test', source: 'packaged',

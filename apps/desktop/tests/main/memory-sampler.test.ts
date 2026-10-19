@@ -76,29 +76,28 @@ describe('desktop memory sampler', () => {
   });
 });
 
-it('waits 30s after ready, samples every 60s, includes GPU/utility, and respects opt-out', async () => {
+it('waits 30s after ready, samples every 60s, includes GPU/utility, without a consent lookup', async () => {
   vi.useFakeTimers();
-  let enabled = false;
   const report = vi.fn(async (_samples: ProcessMemorySample[]) => {});
   const app = { getAppMetrics: vi.fn(() => [
     { ...metric(1), type: 'Browser' }, metric(),
     { ...metric(2), type: 'GPU' }, { ...metric(3), type: 'Utility' },
   ]) };
   const sampler = startMemorySampler({ context, app, getManagedRendererPids: () => [42],
-    isEnabled: () => enabled, report });
+    report });
   await vi.advanceTimersByTimeAsync(29_999);
   expect(app.getAppMetrics).not.toHaveBeenCalled();
   await vi.advanceTimersByTimeAsync(1);
-  expect(app.getAppMetrics).not.toHaveBeenCalled();
-  enabled = true;
-  await vi.advanceTimersByTimeAsync(59_999);
-  expect(report).not.toHaveBeenCalled();
-  await vi.advanceTimersByTimeAsync(1);
   expect(report).toHaveBeenCalledOnce();
   expect(report.mock.calls[0]![0].map(sample => sample.process_role)).toEqual(['main', 'renderer', 'gpu', 'utility']);
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(report).toHaveBeenCalledTimes(2);
+  for (const [samples] of report.mock.calls) for (const sample of samples) {
+    for (const key of ['path', 'url', 'content', 'prompt', 'pid']) expect(sample).not.toHaveProperty(key);
+  }
   sampler.stop(); sampler.stop();
   await vi.advanceTimersByTimeAsync(120_000);
-  expect(report).toHaveBeenCalledOnce();
+  expect(report).toHaveBeenCalledTimes(2);
   expect(vi.getTimerCount()).toBe(0);
 });
 
@@ -150,43 +149,6 @@ it('the actual before-quit and will-quit listeners stop collection before its fi
     await vi.advanceTimersByTimeAsync(120_000);
     expect(report).not.toHaveBeenCalled();
   }
-});
-
-it('aborts the actual consent fetch and response body when stopped', async () => {
-  const samplerModule = await import('../../src/main/memory-sampler.js');
-  const { readFileSync } = await import('node:fs');
-  const { runInNewContext } = await import('node:vm');
-  const ts = await import('typescript');
-  const source = readFileSync(new URL('../../src/main/index.ts', import.meta.url), 'utf8');
-  const ast = ts.createSourceFile('index.ts', source, ts.ScriptTarget.Latest, true);
-  let callback = '';
-  function visit(node: import('typescript').Node) {
-    if (!callback && ts.isPropertyAssignment(node) && node.name.getText(ast) === 'isEnabled') callback = node.initializer.getText(ast);
-    ts.forEachChild(node, visit);
-  }
-  visit(ast);
-  expect(callback).not.toBe('');
-  vi.useFakeTimers();
-  let requestSignal!: AbortSignal;
-  const fetcher = vi.fn(async (_url, init) => {
-    requestSignal = init.signal;
-    return { ok: true, json: () => new Promise((_resolve, reject) => requestSignal.addEventListener('abort', () => reject(new Error('aborted')))) };
-  });
-  vi.stubGlobal('fetch', fetcher);
-  const report = vi.fn();
-  const sampler = startMemorySampler({ context, app: { getAppMetrics: () => [] }, getManagedRendererPids: () => [],
-    isEnabled: runInNewContext(ts.transpileModule(`(${callback})`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, { options: {}, fetch: fetcher, URL, AbortSignal,
-      readMemorySamplingConsent: samplerModule.readMemorySamplingConsent,
-      resolveDaemonBaseUrl: () => async () => 'http://localhost:1234',
-    }), report });
-  try {
-    await vi.advanceTimersByTimeAsync(30_000);
-    expect(requestSignal.aborted).toBe(false);
-    sampler.stop();
-    expect(requestSignal.aborted).toBe(true);
-    await vi.advanceTimersByTimeAsync(60_000);
-    expect(report).not.toHaveBeenCalled();
-  } finally { sampler.stop(); vi.unstubAllGlobals(); }
 });
 
 it.each([20_000, 40_000])('uses Electron ready as first-sample origin after %dms of sidecar boot', async (elapsed) => {

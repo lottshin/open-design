@@ -308,9 +308,13 @@ export async function observePendingInstallerApplyAttempts(
   return { observed };
 }
 
+export type ObserveUpdateLifecycleStagesOptions = Omit<ObservePendingInstallerApplyAttemptsOptions, 'analytics'> & {
+  analytics: Pick<AnalyticsService, 'capture' | 'captureSafety'>;
+};
+
 /** Replay immutable stage records independently of version-apply classification. */
 export async function observeUpdateLifecycleStages(
-  options: ObservePendingInstallerApplyAttemptsOptions,
+  options: ObserveUpdateLifecycleStagesOptions,
 ): Promise<{ queued: number }> {
   const root = installerObservationRoot(options.dataRoot);
   const now = options.now?.() ?? new Date();
@@ -362,7 +366,7 @@ export async function observeUpdateLifecycleStages(
       } catch { /* Offline, malformed, or unavailable observations never fail startup. */ }
     }
   }
-  queued += await replayUpdateStageMetrics(options, entries.map(entry => entry.isDirectory() ? entry.name : ""), decision, now);
+  queued += await replayUpdateStageMetrics(options, entries.map(entry => entry.isDirectory() ? entry.name : ""), now);
   return { queued };
 }
 
@@ -375,8 +379,7 @@ async function readObservationConfig(dataRoot: string): Promise<AppConfigPrefs> 
 /** Fixed names only; no arbitrary local properties reach the network. */
 let metricScanOffset = 0;
 async function replayUpdateStageMetrics(
-  options: ObservePendingInstallerApplyAttemptsOptions, entries: string[],
-  decision: ReturnType<typeof deliveryForConfig>, now: Date,
+  options: ObserveUpdateLifecycleStagesOptions, entries: string[], now: Date,
 ): Promise<number> {
   let queued = 0;
   const root = installerObservationRoot(options.dataRoot);
@@ -392,7 +395,8 @@ async function replayUpdateStageMetrics(
       try {
         try {
           const prior = JSON.parse(await readFile(receipt, 'utf8'));
-          if (prior.status === 'queued' || String(prior.status).startsWith('skipped_')) continue;
+          // Old consent/identity skips are not safety-channel delivery receipts.
+          if (prior.status === 'queued' || prior.status === 'skipped_analytics_disabled') continue;
         } catch { /* Unacknowledged records may retry with the same ID. */ }
         const raw = JSON.parse(await readFile(file, 'utf8'));
         const parsed = updateStageMetricSchema.safeParse(raw);
@@ -402,18 +406,17 @@ async function replayUpdateStageMetrics(
             raw.namespace !== options.namespace || raw.channel !== currentChannel ||
             !Number.isFinite(at) || at > now.getTime() || now.getTime() - at > INSTALLER_OBSERVATION_TTL_MS) continue;
         const insertId = `update_stage:${flowId}:${stage}:${phase}`;
-        let status: string = decision.delivery.status;
-        if (decision.context != null) {
+        let status = 'skipped_analytics_disabled';
+        if (readPosthogConfig(options.env ?? process.env) != null) {
           const properties = parseClientMetricEvent('client_update_stage_result', {
             ...parsed.data, metric_schema_version: 1, telemetry_capability: 'supported',
-            ...buildClientTelemetryParams({ ...raw, occurred_at: new Date(at).toISOString() }, { eventId: insertId, deviceId: decision.context.deviceId,
+            ...buildClientTelemetryParams({ ...raw, occurred_at: new Date(at).toISOString() }, { eventId: insertId, deviceId: null,
               clientType: 'desktop', captureSource: 'desktop/updater', env: 'unknown',
               appVersion: null, platform: null, arch: null, reportedAt: now.toISOString() }),
           });
           if (properties == null) continue;
-          const result = await options.analytics.capture({ eventName: 'client_update_stage_result',
-            context: decision.context, appVersion: options.appVersion, properties, insertId });
-          if (result?.status !== 'queued') continue;
+          await options.analytics.captureSafety({ eventName: 'client_update_stage_result',
+            appVersion: options.appVersion, properties, insertId });
           status = 'queued';
           queued += 1;
         }

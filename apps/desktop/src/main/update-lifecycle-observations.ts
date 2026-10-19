@@ -102,11 +102,10 @@ export async function recordUpdateStage(
 export async function recordIncomingUpdateStageResults(input: {
   root: string | null | undefined; namespace: string; channel: string; version: string | null;
   sessionId: string | null; osVersion: string | null; platform: string; arch: string;
-  metricsConsent: () => Promise<boolean>; now?: () => Date;
+  now?: () => Date;
 }): Promise<void> {
   if (input.root == null) return;
   try {
-    if (await input.metricsConsent() !== true) return;
     const now = input.now?.() ?? new Date();
     let recorded = 0;
     for (const entry of await readdir(input.root, { withFileTypes: true })) {
@@ -135,5 +134,5 @@ export async function recordIncomingUpdateStageResults(input: {
         if (++recorded >= 64) break;
       } catch { /* Absent, legacy, already recorded or damaged observations stay unknown. */ }
     }
-  } catch { /* Consent and storage failures cannot affect desktop startup. */ }
+  } catch { /* Storage failures cannot affect desktop startup. */ }
 }

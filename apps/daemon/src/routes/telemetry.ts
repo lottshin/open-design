@@ -279,11 +279,6 @@ export function registerTelemetryRoutes(app: Express, deps: RegisterTelemetryRou
     const isFault = isProcessExitEventName(eventName)
       && !['clean-exit', 'recovery-attempt'].includes(String(processExitMetricFields(eventName, properties).reason));
     const incidentId = isFault ? deps.onHostFault?.(eventName, properties) : null;
-    if (isClientMetricEventName(eventName) || isProcessExitEventName(eventName)) {
-      if (!(await readMetricsConsent(dataDir)).metrics) { res.json({ ok: true }); return; }
-      const config = await deps.readAppConfig(dataDir);
-      if (config.telemetry?.metrics !== true) { res.json({ ok: true }); return; }
-    }
     const metricCommon = buildClientTelemetryParams(properties, {
       eventId: randomUUID(), deviceId: null, appVersion: (await appVersionPromise)?.version ?? null,
       clientType: 'desktop', captureSource: 'desktop/observability', env: readTelemetryEnvironment(),

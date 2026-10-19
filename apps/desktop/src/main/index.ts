@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { BrowserWindow, Menu, app, dialog, globalShortcut, ipcMain, powerMonitor, shell, type MenuItemConstructorOptions } from "electron";
 import { attachStartupReadyIpc, createStartupTiming, type StartupTiming } from "./startup-timing.js";
 import { beginLaunchMarker } from "./launch-type.js";
-import { startMemorySampler, readMemorySamplingConsent } from "./memory-sampler.js";
+import { startMemorySampler } from "./memory-sampler.js";
 export { createStartupTiming, type StartupTiming } from "./startup-timing.js";
 
 import {
@@ -743,7 +743,6 @@ async function runDesktopMainWithTiming(
     getManagedRendererPids: () => BrowserWindow.getAllWindows()
       .filter(window => !window.isDestroyed() && !window.webContents.isDestroyed())
       .map(window => window.webContents.getOSProcessId()),
-    isEnabled: signal => readMemorySamplingConsent(resolveDaemonBaseUrl(options), signal),
     report: async (samples, signal) => {
       for (const sample of samples) {
         if (signal.aborted) break;
@@ -783,11 +782,6 @@ async function runDesktopMainWithTiming(
     );
   }
 
-  const readUpdateMetricsConsent = async (): Promise<boolean> => {
-    const base = await resolveDaemonBaseUrl(options)();
-    const response = await fetch(new URL("/api/analytics/config", base), { signal: AbortSignal.timeout(1000) });
-    return response.ok && (await response.json() as { enabled?: boolean }).enabled === true;
-  };
   const updater = createDesktopUpdater(
     {
       currentVersion: options.update?.currentVersion,
@@ -805,7 +799,6 @@ async function runDesktopMainWithTiming(
       openPath: (path) => shell.openPath(path),
       appSessionId: startupTiming.context().app_session_id,
       osVersion: process.getSystemVersion(),
-      metricsConsent: readUpdateMetricsConsent,
     },
   );
   // Resolve the namespace root the same way the daemon diagnostics export does
@@ -1082,7 +1075,6 @@ async function runDesktopMainWithTiming(
         channel: updater.config.channel, version: updater.config.currentVersion,
         sessionId: startupTiming.context().app_session_id, osVersion: process.getSystemVersion(),
         platform: process.platform, arch: process.arch,
-        metricsConsent: readUpdateMetricsConsent,
       });
     },
     splashWindow: options.splashWindow,

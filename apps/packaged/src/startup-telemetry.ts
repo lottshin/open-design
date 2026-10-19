@@ -17,8 +17,7 @@
 //    in Promise.race with a hard timeout, and swallows every error — it can
 //    neither block nor crash the exit.
 //
-// Consent: read the resolved daemon config root directly on this fatal path.
-// Opt-out or unavailable/corrupt consent suppresses startup exit telemetry.
+// Stability events use the safety channel independently of metrics consent.
 //
 // Payload PII: the free-form crash fields (error_message, error_stack) and every
 // path we send (log_path, native_module_path) run through `scrubUserPaths` to
@@ -436,19 +435,6 @@ export async function captureStartupFailure(
 // CS02-local event names pending CS01 registry alignment. Unlike the legacy
 // crash path, launch denominators require a real installation identity: never
 // group unrelated installations under the synthetic namespace fallback.
-/** Standalone startup cannot ask a dead daemon; read its resolved config root. */
-export async function readStartupMetricsConsent(dataRoot: string | null | undefined): Promise<boolean> {
-  if (!dataRoot) return false;
-  try {
-    const value: unknown = JSON.parse(await readFile(join(dataRoot, 'app-config.json'), 'utf8'));
-    if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-    const telemetry = (value as { telemetry?: unknown }).telemetry;
-    if (telemetry === undefined) return true; // Same first-install default as daemon.
-    return !!telemetry && typeof telemetry === 'object' && !Array.isArray(telemetry)
-      && (telemetry as { metrics?: unknown }).metrics === true;
-  } catch (error) { return (error as NodeJS.ErrnoException).code === 'ENOENT'; }
-}
-
 export async function reportLaunchEvent(args: {
   posthogKey: string | null;
   posthogHost: string | null;
@@ -461,7 +447,7 @@ export async function reportLaunchEvent(args: {
   properties: Record<string, unknown>;
 }, deps: CaptureDeps = {}): Promise<void> {
   try {
-    if (!args.posthogKey?.trim() || !args.installationRoot || !await readStartupMetricsConsent(args.dataRoot)) return;
+    if (!args.posthogKey?.trim() || !args.installationRoot) return;
     const identity = JSON.parse(readFileSync(join(args.installationRoot, "installation.json"), "utf8")) as { installationId?: unknown };
     if (typeof identity.installationId !== "string" || !identity.installationId.trim()) return;
     const occurredAt = args.properties.occurred_at;
@@ -511,7 +497,6 @@ export async function reportStartupFailure(
   deps: ReportDeps = {},
 ): Promise<void> {
   try {
-    if (!await readStartupMetricsConsent(args.dataRoot)) return;
     const classification = classifyStartupFailure(args.error, args.isPathAccess);
     let errorCode: string | undefined;
     let missingModule: string | undefined;

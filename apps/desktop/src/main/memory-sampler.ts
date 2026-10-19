@@ -42,7 +42,6 @@ export type MemorySamplerOptions = {
   initialDelayMs?: number;
   /** Monotonic Electron ready timestamp, including packaged sidecar boot time. */
   readyAtMs?: number;
-  isEnabled?: (signal: AbortSignal) => Promise<boolean> | boolean;
 };
 
 export type MemorySampler = { stop(): void };
@@ -74,8 +73,6 @@ export function startMemorySampler(options: MemorySamplerOptions): MemorySampler
     if (stopped || busy) return;
     busy = true;
     try {
-      if (options.isEnabled && !await options.isEnabled(controller.signal)) return;
-      if (stopped) return;
       const at = Date.now();
       const common = { ...context, sampled_at: new Date(at).toISOString(), sampling_interval_ms: intervalMs };
       const memory = process.memoryUsage();
@@ -142,15 +139,4 @@ export function startMemorySampler(options: MemorySamplerOptions): MemorySampler
 
 function bytesOrNull(value: number): number | null {
   return Number.isFinite(value) && value >= 0 ? Math.round(value) : null;
-}
-
-/** Consent and response-body reads share sampler cancellation and a 3s budget. */
-export async function readMemorySamplingConsent(discover: () => Promise<string>, signal: AbortSignal): Promise<boolean> {
-  try {
-    const requestSignal = AbortSignal.any([signal, AbortSignal.timeout(3000)]);
-    const base = await discover();
-    requestSignal.throwIfAborted();
-    const response = await fetch(new URL('/api/analytics/config', base), { signal: requestSignal });
-    return response.ok && (await response.json() as { enabled?: boolean }).enabled === true;
-  } catch { return false; }
 }

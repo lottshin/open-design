@@ -1,4 +1,5 @@
 import express from 'express';
+import { processExitMetricFields } from '@open-design/contracts/analytics';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -90,21 +91,51 @@ describe('CS01 telemetry HTTP boundary', () => {
   });
 });
 
-it('drops memory events after opt-out, including callers bypassing the desktop sampler', async () => {
+it('admits every stability metric after opt-out and strips private payload fields', async () => {
+  version.mockResolvedValue({ version: '2.0.0', channel: 'stable' });
   const app = express();
   const telemetry = registerTelemetryRoutes(app, {
     dataDir: '/unused', readAppConfig: vi.fn(async () => ({ telemetry: { metrics: false } })) as never,
     writeAppConfig: vi.fn() as never,
   });
+  const launch = { launch_attempt_id: 'launch', startup_type: 'cold', measurement_boundary: 'process_entry', started_at: metric.occurred_at };
+  const preview = { preview_attempt_id: 'preview', render_mode: 'srcdoc', artifact_kind: null, started_at: metric.occurred_at };
+  const samples: Record<string, Record<string, unknown>> = {
+    client_launch_attempt: launch,
+    client_business_ready: { ...launch, duration_ms: 100 },
+    client_launch_result: { ...launch, result: 'ready', duration_ms: 100 },
+    client_navigation_result: { navigation_id: 'nav', navigation_type: 'project_enter', source_type: 'home', target_type: 'project', result: 'ready', started_at: metric.occurred_at, duration_ms: 100 },
+    client_process_memory_sample: {},
+    client_process_exit: processExitMetricFields('desktop_renderer_crash', { reason: 'oom' }),
+    client_update_stage_result: { flow_id: 'flow', stage: 'check', result: 'failed', reason_code: 'check_failed', from_version: '1.0.0', to_version: null, update_path: null, artifact_type: null, trigger: 'manual', duration_ms: null },
+    client_preview_attempt: preview,
+    client_preview_result: { ...preview, result: 'success', duration_ms: 100, monitoring_kind: 'visible_content' },
+    client_responsiveness_window: { measurement: 'long_task', measurable: true, unavailable_reason: null, window_ms: 30_000, long_task_count: 0, severe_task_count: 0, max_duration_ms: null },
+    client_input_responsiveness: { area: 'composer', window_ms: 30_000, input_attempt_count: 1, qualified_sample_count: 1, over_500ms_count: 0, max_input_to_presentation_ms: 24, max_queue_delay_ms: 0, sample_floor_ms: 16 },
+    client_chat_scroll_frames: { measurable: true, window_ms: 30_000, frame_count: 2, interval_count: 1, over_50ms_count: 0, max_frame_interval_ms: 16, sampling_truncated: false },
+    client_responsiveness_recovery: { recovery_id: 'recovery', previous_occurred_at: metric.occurred_at, duration_ms: null, severe_task_count: 0, reason: 'unclean_exit_unknown' },
+  };
   const server = app.listen(0, '127.0.0.1');
   try {
     if (!server.listening) await new Promise<void>(resolve => server.once('listening', resolve));
-    const response = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/api/observability/event`, {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ event: 'client_process_memory_sample', properties: metric }),
-    });
-    expect(response.status).toBe(200);
-    expect(captureSafety).not.toHaveBeenCalled();
+    for (const [event, fields] of Object.entries(samples)) {
+      const response = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/api/observability/event`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ event, properties: { ...metric, ...fields, path: '/private', url: 'https://private.invalid', content: 'secret', prompt: 'secret', pid: 123 } }),
+      });
+      expect(response.status, event).toBe(200);
+      const call = captureSafety.mock.calls.at(-1)![0];
+      expect(call.eventName).toBe(event);
+      for (const key of ['path', 'url', 'content', 'prompt', 'pid']) expect(call.properties, event).not.toHaveProperty(key);
+    }
+    expect(captureSafety).toHaveBeenCalledTimes(Object.keys(samples).length);
+    // Legacy carriers and browser health forwards keep the same safety policy.
+    for (const event of ['desktop_renderer_crash', 'desktop_child_process_crash', 'desktop_unclean_exit', 'daemon_unclean_exit', 'packaged_runtime_failed', 'client_long_task', 'client_chat_interaction_latency', 'client_chat_scroll_frozen', 'client_chat_first_paint', 'client_chat_dom_growth', 'client_chat_memory_pressure', 'client_chat_stream_health', 'client_preview_white_screen', 'client_preview_runtime_error', 'client_preview_resource_error', 'client_white_screen']) {
+      await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/api/observability/event`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ event, properties: {} }),
+      });
+      expect(captureSafety.mock.calls.at(-1)![0].eventName).toBe(event);
+    }
   } finally {
     telemetry.disposeFatalHandlers();
     await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
@@ -113,7 +144,7 @@ it('drops memory events after opt-out, including callers bypassing the desktop s
 
 
 it.each(['{"telemetry":{"metrics":false}', 'null', '[]', 'false'])(
-  'fails closed at desktop config and memory ingestion after saved opt-out becomes %s', async (damaged) => {
+  'keeps product config disabled but admits memory safety events after saved opt-out becomes %s', async (damaged) => {
     const dataDir = await mkdtemp(path.join(tmpdir(), 'od-consent-route-'));
     const configPath = path.join(dataDir, 'app-config.json');
     try {
@@ -129,7 +160,7 @@ it.each(['{"telemetry":{"metrics":false}', 'null', '[]', 'false'])(
           body: JSON.stringify({ event: 'client_process_memory_sample', properties: metric }),
         });
         expect(response.status).toBe(200);
-        expect(captureSafety).not.toHaveBeenCalled();
+        expect(captureSafety).toHaveBeenCalledOnce();
       }, undefined, dataDir);
     } finally { await rm(dataDir, { recursive: true, force: true }); }
   },

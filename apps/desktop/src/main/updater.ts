@@ -139,7 +139,6 @@ import {
 const ARTIFACT_DOWNLOAD_MAX_ATTEMPTS = 3;
 
 export type DesktopUpdaterDeps = {
-  metricsConsent?: () => Promise<boolean>;
   appSessionId?: string | null;
   osVersion?: string | null;
   extractLauncherPayloadArchive?: (input: LauncherPayloadExtractInput) => Promise<void>;
@@ -477,14 +476,7 @@ export function createDesktopUpdater(
     pendingJournalWrites += 1;
     // At most 32 pending writes; never await telemetry on the update/interaction path.
     journalQueue = journalQueue.then(async () => {
-      if (deps.metricsConsent == null) return;
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      try {
-        const enabled = await Promise.race([deps.metricsConsent(), new Promise<false>(resolve => {
-          timer = setTimeout(() => resolve(false), 1000);
-        })]);
-        if (enabled === true) await recordUpdateStage(handle, event, { ...context, osVersion: deps.osVersion ?? null });
-      } finally { if (timer != null) clearTimeout(timer); }
+      await recordUpdateStage(handle, event, { ...context, osVersion: deps.osVersion ?? null });
     }).catch(() => undefined)
       .finally(() => { pendingJournalWrites -= 1; });
   }

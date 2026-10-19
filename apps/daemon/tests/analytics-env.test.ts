@@ -278,22 +278,10 @@ it('fills missing capture versions from packaged metadata and preserves original
   } finally { await rm(dataDir, { recursive: true, force: true }); }
 });
 
-it('suppresses memory safety captures when metrics consent is disabled', async () => {
-  posthogCapture.mockReset();
-  const dataDir = await mkdtemp(path.join(tmpdir(), 'od-memory-optout-'));
-  try {
-    await writeFile(path.join(dataDir, 'app-config.json'), JSON.stringify({ installationId: 'install-1', telemetry: { metrics: false } }));
-    const { createAnalyticsService } = await import('../src/analytics.js');
-    const service = createAnalyticsService({ dataDir, env: { POSTHOG_KEY: 'phc_test' } });
-    await service.captureSafety({ eventName: 'client_process_memory_sample', appVersion: '1.0.0', properties: {} });
-    expect(posthogCapture).not.toHaveBeenCalled();
-    await service.shutdown();
-  } finally { await rm(dataDir, { recursive: true, force: true }); }
-});
 
 
 it.each(['{"telemetry":{"metrics":false}', 'null', '[]'])(
-  'suppresses memory service captures after saved opt-out is damaged: %s', async (damaged) => {
+  'keeps memory safety captures private after saved opt-out is damaged: %s', async (damaged) => {
     posthogCapture.mockReset();
     const dataDir = await mkdtemp(path.join(tmpdir(), 'od-memory-damaged-consent-'));
     const { createAnalyticsService } = await import('../src/analytics.js');
@@ -304,24 +292,26 @@ it.each(['{"telemetry":{"metrics":false}', 'null', '[]'])(
       process_role: 'main', process_instance_id: 'process-1', uptime_ms: 60_000,
       rss_bytes: 4096, heap_used_bytes: null, external_bytes: null,
       sampled_at: '2026-10-16T01:00:00.000Z', sampling_interval_ms: 60_000,
+      path: '/private', url: 'https://private.invalid', content: 'secret', prompt: 'secret', pid: 123,
     };
     try {
       const file = path.join(dataDir, 'app-config.json');
       await writeFile(file, JSON.stringify({ installationId: 'install-1', telemetry: { metrics: false } }));
       await service.captureSafety({ eventName: 'client_process_memory_sample', appVersion: '1.0.0', properties });
-      expect(posthogCapture).not.toHaveBeenCalled();
+      expect(posthogCapture).toHaveBeenCalledTimes(1);
       await writeFile(file, damaged);
       await service.captureSafety({ eventName: 'client_process_memory_sample', appVersion: '1.0.0', properties });
-      expect(posthogCapture).not.toHaveBeenCalled();
-      // A repaired explicit opt-in permits the very same valid sample.
+      expect(posthogCapture).toHaveBeenCalledTimes(2);
+      // Safety delivery also survives a repaired explicit opt-in.
       await writeFile(file, JSON.stringify({ installationId: 'install-1', telemetry: { metrics: true } }));
       await service.captureSafety({ eventName: 'client_process_memory_sample', appVersion: '1.0.0', properties });
-      expect(posthogCapture).toHaveBeenCalledTimes(1);
+      expect(posthogCapture).toHaveBeenCalledTimes(3);
+      for (const [call] of posthogCapture.mock.calls) for (const key of ['path', 'url', 'content', 'prompt', 'pid']) expect(call.properties).not.toHaveProperty(key);
     } finally { await service.shutdown(); await rm(dataDir, { recursive: true, force: true }); }
   },
 );
 
-it('emits consent-gated exit metrics with occurrence version, bounded reasons and stable dedup IDs', async () => {
+it('emits safety exit metrics with occurrence version, bounded reasons and stable dedup IDs', async () => {
   posthogCapture.mockReset();
   const dataDir = await mkdtemp(path.join(tmpdir(), 'od-exit-replay-'));
   const config = path.join(dataDir, 'app-config.json');
@@ -343,7 +333,7 @@ it('emits consent-gated exit metrics with occurrence version, bounded reasons an
     await writeFile(config, '{"telemetry":{"metrics":false}');
     const count = posthogCapture.mock.calls.length;
     await service.captureSafety({ eventName: 'daemon_unclean_exit', appVersion: '2.0.0', properties });
-    expect(posthogCapture).toHaveBeenCalledTimes(count);
+    expect(posthogCapture).toHaveBeenCalledTimes(count + 2);
     await service.shutdown();
   } finally { await rm(dataDir, { recursive: true, force: true }); }
 });

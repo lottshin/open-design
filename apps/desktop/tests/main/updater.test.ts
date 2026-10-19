@@ -1751,7 +1751,6 @@ describe("desktop updater", () => {
         namespace: "release-beta",
         source: SIDECAR_SOURCES.PACKAGED,
       }, {
-        metricsConsent: async () => true,
         extractLauncherPayloadArchive: async ({ destinationRoot }) => {
           await mkdir(join(destinationRoot, "payload", "Open Design Beta.app", "Contents", "MacOS"), { recursive: true });
           await mkdir(join(destinationRoot, "payload", "Open Design Beta.app", "Contents", "Resources", "open-design"), { recursive: true });
@@ -3942,7 +3941,7 @@ it.each(['failed', 'cancelled'] as const)('journals %s checks with an independen
     arch: 'arm64', downloadRoot: join(root, 'updates'),
     env: { ...updaterEnv('https://fixture.invalid/metadata.json'), [DESKTOP_UPDATE_ENV.OPEN_DRY_RUN]: '0' },
     installerObservationRoot: observationRoot, namespace: 'release', source: SIDECAR_SOURCES.TOOLS_PACK,
-  }, { metricsConsent: async () => true, fetch: vi.fn(async () => {
+  }, { fetch: vi.fn(async () => {
     const error = new Error('/private/network-secret');
     if (result === 'cancelled') error.name = 'AbortError';
     throw error;
@@ -3970,7 +3969,6 @@ it.each(['manual', 'silent'] as const)('correlates %s installer stages and isola
       env: { ...updaterEnv(fixture.metadataUrl), [DESKTOP_UPDATE_ENV.OPEN_DRY_RUN]: '0', [DESKTOP_UPDATE_ENV.AUTO_OPEN]: trigger === 'silent' ? '1' : '0' },
       installerObservationRoot: observationRoot, namespace: 'release', source: SIDECAR_SOURCES.TOOLS_PACK,
     }, {
-      metricsConsent: async () => true,
       fetch: async (url, init) => {
         if (fault === 'network' && String(url).endsWith('/artifact.dmg')) throw new Error('offline');
         if (fault === 'cancelled' && String(url).endsWith('.sha256')) throw new DOMException('cancelled', 'AbortError');
@@ -4003,7 +4001,7 @@ it.each(['manual', 'silent'] as const)('correlates %s installer stages and isola
   }
 });
 
-it.each([false, null] as const)('does not journal metrics with disabled or unavailable consent (%s)', async consent => {
+it('journals safety metrics without a consent dependency', async () => {
   const root = makeRoot();
   const observationRoot = join(root, 'observations', 'installer');
   try {
@@ -4011,10 +4009,15 @@ it.each([false, null] as const)('does not journal metrics with disabled or unava
       arch: 'arm64', downloadRoot: join(root, 'updates'),
       env: { ...updaterEnv('https://fixture.invalid/metadata.json'), [DESKTOP_UPDATE_ENV.OPEN_DRY_RUN]: '0' },
       installerObservationRoot: observationRoot, namespace: 'release', source: SIDECAR_SOURCES.TOOLS_PACK,
-    }, { metricsConsent: async () => { if (consent === null) throw new Error('unavailable'); return consent; },
+    }, {
       fetch: async () => { throw new Error('offline'); }, logger: { warn: vi.fn(), error: vi.fn() } });
     expect((await updater.checkForUpdates()).error?.code).toBe('metadata-unreachable');
-    expect(existsSync(observationRoot)).toBe(false);
+    await vi.waitFor(async () => {
+      const [flow] = await readdir(observationRoot);
+      const record = JSON.parse(await readFile(join(observationRoot, flow!, 'stages/check-result.json'), 'utf8'));
+      expect(record).toMatchObject({ stage: 'check', result: 'failed' });
+      for (const key of ['path', 'url', 'content', 'prompt', 'pid']) expect(record).not.toHaveProperty(key);
+    });
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -4026,7 +4029,7 @@ it('keeps a downloaded release on its original flow after a polling check', asyn
     const updater = createDesktopUpdater({ arch: 'arm64', downloadRoot: join(root, 'updates'),
       env: { ...updaterEnv(fixture.metadataUrl), [DESKTOP_UPDATE_ENV.OPEN_DRY_RUN]: '0' },
       installerObservationRoot: observationRoot, namespace: 'release', source: SIDECAR_SOURCES.TOOLS_PACK,
-    }, { metricsConsent: async () => true, launchInstallerAfterQuit: async () => '' });
+    }, { launchInstallerAfterQuit: async () => '' });
     await updater.checkForUpdates({ trigger: 'silent' });
     await updater.checkForUpdates({ trigger: 'silent' });
     await updater.installUpdate({ trigger: 'manual' });
