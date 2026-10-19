@@ -7,21 +7,19 @@ metrics remain defined in [stability-metrics.md](./stability-metrics.md).
 
 ## Integration status
 
-Two protected-file changes still require the dispatcher's scope authorization:
+The four new event schemas are registered in `client-metrics.ts`. The existing
+transport builds the common envelope with `buildClientTelemetryParams` and
+admits each new payload through `parseClientMetricEvent`; unknown fields are
+stripped and invalid payloads are dropped. Existing safety events keep their
+historical shape. The added metrics use `metric_schema_version=1`; historical
+`event_schema_version` semantics remain unchanged.
 
-- Register the four new schemas in `client-metrics.ts`. Until registration, new
-  names fall through the old transport instead of `parseClientMetricEvent`;
-  they must not be released in this state. The schema-admission regression is
-  intentionally red and the additive fields are ready in
-  `client-observability.ts`.
-- Add a send-time consent predicate to `error-tracking.ts` and pass it from the
-  responsiveness gate. This must also fence a revoked grant across a later
-  re-grant, so previously buffered metrics cannot reappear. The regression for
-  delayed transport initialization is intentionally red.
-
-The external delivery logs contain a reviewable, unapplied patch for those
-changes. Other production callers retain their existing behavior. This candidate
-is blocked on integration, not ready for publication.
+Responsiveness reports carry a send-time consent predicate. Buffer draining
+checks the original grant epoch, so withdrawal followed by re-grant cannot
+release samples collected under an earlier grant. The chat-health observer also
+disconnects and clears its streaming window on withdrawal; DOM/heap samples are
+skipped without consent. No transport integration blocker remains. Local checks
+and fixture profiling establish an implementation candidate, not QA acceptance.
 
 ## Consent and privacy
 
@@ -43,8 +41,9 @@ only; their strings are never transmitted. The shared envelope supplies
 installation/session/platform/version metadata, using null for unavailable
 values. `device_id` identifies an installation, never an account.
 
-The old safety transport's early buffer is the remaining consent blocker noted
-above. Events whose HTTP send has already started cannot be recalled.
+The early safety buffer checks consent again immediately before dispatch. Events
+whose HTTP send has already started cannot be recalled. The existing bounded
+buffer and lack of ingestion acknowledgment still make delivery best effort.
 
 ## Long tasks and qualified exposure
 
@@ -189,18 +188,21 @@ payload/collector budget. The grant check adds one <=3s config request.
 A reproducible local headless Chromium 148 fixture bundled the real source
 collectors, injected 10,000 small-task callbacks and 10,000 input callbacks, and
 used 26 trusted keyboard attempts. OS renderer process CPU from CDP
-`SystemInfo.getProcessInfo` was **17.974ms**; renderer task duration was 11.445ms.
-GC-to-GC retained JS heap increased **128,276 bytes**. Eight local ingest requests
-used **7,086 JSON bytes** for four active input areas, two heartbeats, the
-legacy maximum and one scroll-frame summary. No production endpoint or actual Open Design runtime was used.
+`SystemInfo.getProcessInfo` was **12.621ms**; renderer task duration was 10.029ms.
+GC-to-GC retained JS heap increased **123,192 bytes**. Eight local ingest requests
+used **6,519 JSON bytes** for four active input areas, two heartbeats, the
+legacy maximum and one scroll-frame summary. No production endpoint or actual
+Open Design runtime was used.
 
 These are fixture results, not an all-platform result. The measurement includes
 collector callback work and local serialization/delivery; it does not exercise
 actual PerformanceObserver entry delivery, reaching the frame budget,
 the existing freeze forensic census, production network behavior, or Electron
-on Windows/macOS. The unapplied schema patch would additionally change the
-serializer path; profiling must be refreshed after it lands. The script and raw
-JSON are retained beside the task logs outside the repository.
+on Windows/macOS. This 2026-10-19 refresh uses the registered schemas and final
+serializer. The script and raw JSON (`3720-integration-budget.json`) are retained beside the task
+logs outside the repository. CPU is the measured callback burst, not a
+30-second physical-device CPU utilization reading; memory is one GC-to-GC
+delta, not a long-session leak test.
 
 ## Verification and QA handoff
 
@@ -209,16 +211,20 @@ clean/unsupported/background/sleep denominator windows, best-effort recovery,
 consent changes, stale grant responses, strict input threshold, fast attempt
 counts with null timings, continued counts beyond the legacy cap, search/settings,
 password exclusion, scroll-frame separation and the frame budget. Existing chat
-health/protocol/freeze tests explicitly opt into metrics. Two schema-admission
-assertions and the delayed-transport consent assertion remain red until the
-protected-file patch is authorized. The two new collector suites were also run
-against the original `aa88f4387` collectors: all 11 then-existing regressions
+health/protocol/freeze tests explicitly opt into metrics. Schema admission and
+delayed-transport withdrawal assertions were red before integration and now
+pass. Added regressions cover re-grant isolation, buffered occurrence timestamps,
+private-field stripping, invalid sample counts, independent frame/recovery
+schemas, and chat-health observer teardown/reset on consent withdrawal. The
+chat-health teardown regression also failed before its fix. The two new collector
+suites were also run against the original `aa88f4387` collectors: all 11 then-existing regressions
 failed; the candidate fixes them. The test-only consent helper was present in
 that baseline harness, but neither original collector was modified.
 
-Before QA, resolve the protected-file blockers, build contracts, rerun the
-focused tests and repo `pnpm typecheck` / `pnpm guard`, and profile the final sink.
-No full web or daemon test suite is required locally. QA must then:
+Local validation uses a contracts build, 13 focused contracts tests and 193
+focused web tests, repository `pnpm typecheck` / `pnpm guard`, and profiling of
+the schema-valid local sink. No full web or daemon test suite is required
+locally. Exact commands and logs are in the external task conclusion. QA must then:
 
 1. On macOS and Windows, install the candidate version, grant metrics and verify
    envelope/version/identity and all four aggregate event names in a local sink.
