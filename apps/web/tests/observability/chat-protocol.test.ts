@@ -1,5 +1,7 @@
 // @vitest-environment jsdom
 
+import { setResponsivenessConsent } from '../../src/observability/responsiveness';
+
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -73,6 +75,7 @@ function allNamed(name: string): Array<Record<string, unknown>> {
 }
 
 beforeEach(() => {
+  setResponsivenessConsent(true);
   eventCallbacks = [];
   fetchMock.mockReset();
   fetchMock.mockResolvedValue(new Response('', { status: 200 }));
@@ -94,6 +97,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  setResponsivenessConsent(false);
   __resetChatProtocolForTest();
   __resetChatContextForTest();
   __resetChatInteractionForTest();

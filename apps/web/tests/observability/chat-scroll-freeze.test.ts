@@ -1,5 +1,7 @@
 // @vitest-environment jsdom
 
+import { setResponsivenessConsent } from '../../src/observability/responsiveness';
+
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -238,6 +240,7 @@ function scrolled(target: HTMLElement): void {
 }
 
 beforeEach(() => {
+  setResponsivenessConsent(true);
   clock = 0;
   fetchMock.mockReset();
   fetchMock.mockResolvedValue(new Response('', { status: 200 }));
@@ -268,6 +271,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  setResponsivenessConsent(false);
   __resetChatScrollFreezeForTest();
   vi.restoreAllMocks();
   clearExceptionTrackingContext();

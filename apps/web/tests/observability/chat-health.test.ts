@@ -1,5 +1,7 @@
 // @vitest-environment jsdom
 
+import { setResponsivenessConsent } from '../../src/observability/responsiveness';
+
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -115,6 +117,7 @@ function buildChatLog(rows: number): HTMLElement {
 }
 
 beforeEach(() => {
+  setResponsivenessConsent(true);
   clock = 0;
   longTaskCallbacks = [];
   fetchMock.mockReset();
@@ -140,6 +143,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  setResponsivenessConsent(false);
   __resetChatHealthForTest();
   vi.useRealTimers();
   vi.restoreAllMocks();
@@ -401,4 +405,15 @@ describe('observability/chat-health — provider-facing seam', () => {
     }).not.toThrow();
     expect(eventsNamed('client_chat_stream_health')).toHaveLength(0);
   });
+});
+
+
+it('does not report chat health while metrics consent is withdrawn', () => {
+  setResponsivenessConsent(false);
+  const handle = openChatSurface({ element: buildChatLog(1), messageCount: 1, virtualized: false });
+  handle.markFirstPaint({ renderedRowCount: 1 });
+  handle.sample('interval');
+  expect(eventsNamed('client_chat_first_paint')).toHaveLength(0);
+  expect(eventsNamed('client_chat_dom_growth')).toHaveLength(0);
+  handle.detach();
 });

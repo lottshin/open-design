@@ -1,3 +1,4 @@
+import { z } from 'zod';
 // Typed shapes for the browser-side `client_*` safety-telemetry namespace.
 //
 // These events do NOT go through the consent-gated product-analytics
@@ -537,3 +538,52 @@ export type ChatObservabilityEvent =
   | { event: 'client_chat_scroll_heal'; props: ChatScrollHealProps };
 
 export type ChatObservabilityEventName = ChatObservabilityEvent['event'];
+
+/** OPEND-3720: metric fields are additive; legacy safety events keep their shape. */
+export type ResponsivenessInputArea = 'composer' | 'search' | 'settings' | 'other_input';
+export interface InputResponsivenessCounts {
+  area: ResponsivenessInputArea;
+  /** Trusted DOM keydowns, including those censored by the Event Timing floor. */
+  input_attempt_count: number;
+  /** Event Timing keydowns with duration >=16ms; denominator for sample rate. */
+  qualified_sample_count: number;
+  over_500ms_count: number;
+  max_input_to_presentation_ms: number | null;
+  max_queue_delay_ms: number | null;
+  sample_floor_ms: 16;
+}
+
+
+const count = z.number().int().safe().nonnegative();
+const ms = z.number().finite().nonnegative();
+// Fields only: client-metrics.ts supplies the common, versioned envelope.
+export const responsivenessWindowFields = {
+  measurement: z.enum(['long_task', 'event_timing']),
+  measurable: z.boolean(),
+  unavailable_reason: z.enum(['unsupported', 'background_or_sleep']).nullable(),
+  window_ms: ms.nullable(),
+  long_task_count: count.nullable().optional(),
+  severe_task_count: count.nullable().optional(),
+  max_duration_ms: ms.nullable().optional(),
+};
+export const inputResponsivenessFields = {
+  area: z.enum(['composer', 'search', 'settings', 'other_input']),
+  window_ms: ms,
+  input_attempt_count: count,
+  qualified_sample_count: count,
+  over_500ms_count: count,
+  max_input_to_presentation_ms: ms.nullable(),
+  max_queue_delay_ms: ms.nullable(),
+  sample_floor_ms: z.literal(16),
+};
+export const scrollFrameFields = {
+  measurable: z.boolean(), window_ms: ms.nullable(), frame_count: count.nullable(),
+  interval_count: count.nullable(), over_50ms_count: count.nullable(), max_frame_interval_ms: ms.nullable(),
+  sampling_truncated: z.boolean(),
+};
+export const responsivenessRecoveryFields = {
+  recovery_id: z.string().min(1).max(80).regex(/^[a-zA-Z0-9-]+$/),
+  previous_occurred_at: z.string().datetime({ offset: true }),
+  duration_ms: ms.nullable(), severe_task_count: count,
+  reason: z.enum(['unclean_exit_unknown', 'observed_severe_task']),
+};
