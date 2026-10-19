@@ -79,12 +79,12 @@ it does not prove how much of the historical production volume it explains.
 Queues remain bounded to 20 desktop sessions and five daemon reports. Erased,
 unwritable, or corrupt markers can lose evidence; there is no reconstructed rate.
 
-## Denominators and consent
+## Denominators and safety delivery
 
 Compute crash-session rate as distinct `(device_id, app_session_id)` with
 normalized reason in `{crash, oom}` divided by distinct matching sessions with a
 real `client_launch_attempt`, within the same version/channel/platform and
-consent/capture domain. A session with multiple renderer crashes contributes
+safety capture domain. A session with multiple renderer crashes contributes
 once. Crash-attempt rate uses distinct `(device_id, launch_attempt_id)` over
 real matching attempts instead. Startup failure rate joins failed
 `client_launch_result` to attempts; `packaged_runtime_failed` is diagnostic
@@ -97,33 +97,30 @@ association, legacy-only data, and a zero/missing denominator mean
 user rate. `device_id` is an installation, not an account or person. The legacy
 synthetic packaged identity is null in the new metric and is ineligible.
 
-All new metric events and the existing exit carriers above honor
-`telemetry.metrics`. Desktop queries config, ingestion and the analytics service
-recheck it; packaged startup reads consent from the already-resolved daemon data
-root. Corrupt/unreadable/unavailable consent fails closed. A missing first-install
-config retains the existing metrics default, as in `readMetricsConsent`.
+稳定性埋点沿用安全通道，不受匿名指标开关控制（`telemetry.metrics`）。
+This includes launch, memory, normalized exit events, legacy exit carriers and
+`packaged_runtime_failed`. There is no desktop, ingestion, service or packaged
+consent lookup for these events. Existing key/environment gates remain.
 The new exit schema strips paths, URLs, content, prompts, raw PIDs and diagnostic
 text. Existing scrubbed diagnostic payload fields retain their historical
 compatibility semantics; this change adds none to the new metric.
 
 ## Memory P2 and overhead
 
-`sampler.stop()` aborts both the consent fetch and its response body through
-`AbortSignal.any([samplerSignal, AbortSignal.timeout(3000)])`. URL discovery
-finishing after stop cannot begin a new fetch. Remaining batch sends are also
-cancelled. An already received event cannot be recalled.
+`sampler.stop()` aborts in-flight HTTP and cancels remaining batch sends.
+An already received event cannot be recalled. No consent fetch is needed.
 
 Packaged main records Electron ready before sidecar boot and passes that
 monotonic timestamp to desktop. First delay is `max(0, 30000 - elapsedSinceReady)`;
 20 seconds of boot leaves 10 seconds, not 30. If registration occurs after the
 30-second deadline, sample as soon as registered rather than fabricate a past
-sample. Consent/network latency can delay actual collection. Subsequent cadence
+sample. Event-loop scheduling can delay actual collection. Subsequent cadence
 remains 60 seconds, with no overlapping batches and at most 64 native entries.
 Collection/transport CPU remains subject to the existing <1% budget; it has not
 been reprofiled across native platforms in this task.
 
 Exit processing adds one schema projection per accepted carrier, no polling.
-Desktop HTTP remains bounded by five seconds; consent by three seconds. Packaged
+Desktop HTTP remains bounded by five seconds. Packaged
 legacy and normalized exit sends run together under their existing five-second
 network cap, without adding a second sequential network wait. No startup success
 path awaits telemetry delivery. Filesystem scheduling is outside network caps.
@@ -134,7 +131,7 @@ Local tests inject real Node child zero/nonzero exit and SIGKILL/restart against
 real checkpoint files; fixtures cover fatal OOM evidence, graceful shutdown,
 stale-previous replay, failed acknowledgement, upgrades and null metadata.
 Renderer handler tests exercise teardown, clean/killed/OOM/recovery reasons and
-breaker suppression. HTTP/service tests check consent, projection and dedup IDs.
+breaker suppression. HTTP/service tests check safety delivery after opt-out, projection and dedup IDs.
 Packaged failure tests inject daemon/web startup failures and inspect captured
 payloads; they do not launch a signed packaged application.
 
@@ -155,10 +152,12 @@ QA must run signed macOS and Windows candidates with isolated runtime data:
    on the killed version and legacy missing IDs remain null. Repeat with network
    disabled, reconnect/restart, and deduplicate by the original event ID.
 5. Delay daemon/web boot by 20 seconds: observe first memory sample near ready+30
-   seconds plus consent latency. Delay >30 seconds: sample promptly at sampler
-   registration. Quit during a held consent response and verify abort/no sample.
+   seconds plus scheduling latency. Delay >30 seconds: sample promptly at sampler
+   registration. Quit during held delivery and verify abort/no further sample.
 6. Opt out, corrupt a previously saved config, and deny config reads separately.
-   Repeat crash/restart and memory cases; verify no new metrics/exit transport.
+   Repeat crash/restart and memory cases; verify safety events still report and
+   normalized payloads contain no paths, URLs, content, prompts or raw PIDs.
+   Confirm a product analytics event remains blocked.
 
 Native main crashes, OS-specific shutdown/update behavior, real ingestion,
 signed-platform QA, release, and seven-day before/after observation remain open.

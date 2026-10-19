@@ -14,36 +14,22 @@ stripped and invalid payloads are dropped. Existing safety events keep their
 historical shape. The added metrics use `metric_schema_version=1`; historical
 `event_schema_version` semantics remain unchanged.
 
-Responsiveness reports carry a send-time consent predicate. Buffer draining
-checks the original grant epoch, so withdrawal followed by re-grant cannot
-release samples collected under an earlier grant. The chat-health observer also
-disconnects and clears its streaming window on withdrawal; DOM/heap samples are
-skipped without consent. No transport integration blocker remains. Local checks
-and fixture profiling establish an implementation candidate, not QA acceptance.
+稳定性埋点沿用安全通道，不受匿名指标开关控制（`telemetry.metrics`）。
+Long tasks, input latency, scroll frames, freeze events, recovery and chat-health
+reports all use the bounded safety buffer. Observers start when installed; there
+is no consent fetch, grant epoch or send-time withdrawal fence. Existing
+key/environment gates, visibility filters, throttles and budgets still apply.
+Local checks establish an implementation candidate, not QA acceptance.
 
 ## Consent and privacy
 
-Observers start only after the UI metrics decision is granted AND a fresh
-`/api/analytics/config` read returns `enabled=true`. That endpoint uses the
-strict daemon `readMetricsConsent` path; a general config fallback cannot grant
-collection. A failed read, malformed response, explicit denial, or a three-second
-timeout leaves collection disabled. The live UI toggle disables immediately;
-a stale in-flight response cannot grant again. There is one extra bounded config
-request per grant, not one per interaction. Observer setup and all reads are
-asynchronous with respect to startup readiness.
-
-The gate covers long tasks, input latency, scroll-frame summaries, the existing
-chat-freeze event and chat-health reports. Local scroll diagnostics and recovery
-continue operating independently. No DOM value, key text, selector, path, URL,
-prompt, attribution container name or raw PID is reported. The old long-task
-attribution fields are omitted. Fixed DOM markers are read for classification
-only; their strings are never transmitted. The shared envelope supplies
-installation/session/platform/version metadata, using null for unavailable
-values. `device_id` identifies an installation, never an account.
-
-The early safety buffer checks consent again immediately before dispatch. Events
-whose HTTP send has already started cannot be recalled. The existing bounded
-buffer and lack of ingestion acknowledgment still make delivery best effort.
+Product analytics and content collection retain their existing consent rules.
+No DOM value, key text, selector, path, URL, prompt, attribution container name
+or raw PID is reported. Fixed DOM markers are read for classification only.
+The shared envelope supplies installation/session/platform/version metadata,
+using null for unavailable values. `device_id` is an installation, not an account.
+The early buffer is bounded and delivery remains best effort without ingestion
+acknowledgment. Missing PostHog credentials leave the transport idle.
 
 ## Long tasks and qualified exposure
 
@@ -67,11 +53,11 @@ uninterrupted foreground interval. A hidden interval, hide/reveal between ticks,
 wall/monotonic disagreement >=1000ms, or delayed tick >35 seconds makes the
 window unmeasurable. Its counts and duration are null, not fake zeros. Unsupported
 API and an observer that throws are reported as unsupported. Entries predating
-consent/reveal are excluded; observation is deliberately unbuffered.
+observer installation/reveal are excluded; observation is deliberately unbuffered.
 
 `measurement=event_timing` has its own support/foreground heartbeat. Support for
 one API never implies support for the other. Qualified exposure is renewed each
-window; an initial grant alone is not an active-session denominator. Session
+window; initial installation alone is not an active-session denominator. Session
 identity comes from the common transport envelope; null session IDs cannot be
 used to manufacture session counts.
 
@@ -89,11 +75,11 @@ A single bounded local checkpoint stores an opaque recovery ID, timestamp,
 maximum observed severe duration and severe-task count. There is at most one
 ordinary storage write per 30-second foreground window, plus a write for each
 severe task before attempting its network report. No task list grows over time.
-Storage denial/corruption cannot interrupt the application. Opt-out discards the
-active checkpoint. Backgrounding and normal page exit clear unknown markers; an already observed
+Storage denial/corruption cannot interrupt the application. Metrics opt-out does
+not discard the checkpoint. Backgrounding and normal page exit clear unknown markers; an already observed
 severe checkpoint survives them for best-effort recovery.
 
-On the next consented collector start, `client_responsiveness_recovery` reports:
+On the next collector start, `client_responsiveness_recovery` reports:
 
 - `observed_severe_task`: callback ran and persisted a >=5s task before a possible
   failed send; original timestamp, maximum duration and count are preserved;
@@ -124,7 +110,7 @@ contents and inputs inside closed shadow roots are not inspected.
   count. These are keyboard interactions, not characters or submitted messages.
 - `qualified_sample_count` counts Event Timing **keydown** records >=16ms. Keyup,
   beforeinput and pointer records cannot duplicate a keyboard sample. Duplicate
-  or pre-consent timing timestamps are ignored.
+  or pre-observation timing timestamps are ignored.
 - `over_500ms_count` counts qualified samples with duration strictly >500ms.
 - `max_input_to_presentation_ms` is Event Timing duration (input timestamp through
   the browser's next presentation), with its native 8ms quantization.
@@ -206,27 +192,17 @@ delta, not a long-session leak test.
 
 ## Verification and QA handoff
 
-New fake-clock/source-path tests cover severe threshold preservation, aggregation,
-clean/unsupported/background/sleep denominator windows, best-effort recovery,
-consent changes, stale grant responses, strict input threshold, fast attempt
-counts with null timings, continued counts beyond the legacy cap, search/settings,
-password exclusion, scroll-frame separation and the frame budget. Existing chat
-health/protocol/freeze tests explicitly opt into metrics. Schema admission and
-delayed-transport withdrawal assertions were red before integration and now
-pass. Added regressions cover re-grant isolation, buffered occurrence timestamps,
-private-field stripping, invalid sample counts, independent frame/recovery
-schemas, and chat-health observer teardown/reset on consent withdrawal. The
-chat-health teardown regression also failed before its fix. The two new collector
-suites were also run against the original `aa88f4387` collectors: all 11 then-existing regressions
-failed; the candidate fixes them. The test-only consent helper was present in
-that baseline harness, but neither original collector was modified.
+Focused tests cover severe thresholds, aggregation, clean/unsupported/background/
+sleep exposure, recovery, input thresholds and counters, password exclusion,
+scroll frame budgets, schema privacy and occurrence time. Safety events are
+checked after metrics opt-out, including early buffer draining; non-stability
+analytics retains a regression for suppression. Exact commands, results and
+any baseline failures are recorded in the external task conclusion/logs. No full
+web or daemon suite is required locally.
 
-Local validation uses a contracts build, 13 focused contracts tests and 193
-focused web tests, repository `pnpm typecheck` / `pnpm guard`, and profiling of
-the schema-valid local sink. No full web or daemon test suite is required
-locally. Exact commands and logs are in the external task conclusion. QA must then:
+QA must then:
 
-1. On macOS and Windows, install the candidate version, grant metrics and verify
+1. On macOS and Windows, install the candidate version and verify
    envelope/version/identity and all four aggregate event names in a local sink.
    Repeat startup, new-project entry and preview while typing/scrolling.
 2. Use a local test harness to block the foreground main thread for 5000–6000ms.
@@ -243,8 +219,9 @@ locally. Exact commands and logs are in the external task conclusion. QA must th
    unmeasurable windows, no qualified denominator during those intervals, and
    no stale entry attribution after reveal.
 6. Revoke metrics before transport initialization and during activity; verify
-   no delayed sends, no resumed old buffer after re-grant, and no new collection.
-   Test unreadable daemon consent and failed storage without breaking the app.
+   continued collection and buffered safety sends.
+   Test unreadable consent and failed storage without breaking the app; confirm
+   product analytics remains blocked and private fields remain absent.
 7. Kill the renderer after a severe callback checkpoint, restart and verify its
    diagnostic recovery summary. Kill it before the callback and verify only an
    unknown/null duration, not a synthetic 5s event. Test multiple app windows.

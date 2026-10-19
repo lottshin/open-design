@@ -37,7 +37,7 @@ Success is a bounded DOM/layout paint heuristic, not raster/screenshot proof.
 An iframe `load` event, injected head ACK or mere body presence is insufficient.
 The parent checks both the sending WindowProxy and current opaque attempt ID;
 foreign and previous-attempt replies cannot settle an attempt. Attempt and
-terminal emission are idempotent locally. A rejected start (no consent/context)
+terminal emission are idempotent locally. A rejected start (ineligible activation)
 cannot emit an orphan result. Network transport remains best effort: there is no
 persistent queue or exactly-once remote-delivery guarantee. Missing terminal
 results must be reported as incomplete observations, not success or zero latency.
@@ -59,15 +59,13 @@ in the new attempt lifecycle, not evidence for a white-screen numerator.
 
 ## Consent and resource budget
 
-Metric consent defaults to false until the existing analytics consent authority
-applies a decision and the daemon analytics config explicitly confirms consent. New metrics are not buffered without consent or bootstrap
-context; unavailable consent fails closed. The navigation metric and existing
-preview/app-white-screen/chat-firstpaint event paths also honor the metrics gate.
-Other historical safety event policies are unchanged. Revocation stops pending probes; a later grant starts a fresh attempt.
-Active previews retry
-eligibility when consent/context becomes available. Revocation stops delivery;
-a censored/missing result is not a successful outcome. No extra consent polling
-or per-attempt network configuration lookup is added.
+稳定性埋点沿用安全通道，不受匿名指标开关控制（`telemetry.metrics`）。
+Navigation, preview attempts/results, preview errors, application white screens
+and chat first paint all use the same safety buffer and direct-fetch transport.
+Metrics opt-out does not stop probes, cancel attempts or suppress results.
+Early events are buffered until safety credentials arrive, within the existing
+buffer bound; absent credentials leave delivery idle. Product analytics and
+content consent keep their existing gates. No extra config polling is added.
 
 One active tracker retains an attempt, ancestor attribute observations, one
 intersection observer and at most eight probe/deadline timers plus one coalesced activity timer.
@@ -155,12 +153,12 @@ which includes asynchronous project/data/message resolution before chat mounts.
 
 Focused unit/component/HTTP tests cover all four preview outcomes, all three
 render labels, visibility/activity exclusion, stale/foreign replies, probe caps,
-transport uncertainty, consent, schema privacy, firstpaint fallback, router guard
+transport uncertainty, safety delivery after opt-out, schema privacy, firstpaint fallback, router guard
 commit/cancel/no-op behavior, and live-preview CSP. New behavior regressions were
 also run against `aa88f4387` and fail there. Root guard/typecheck and exact test
 commands/results are retained in the external task conclusion/logs.
 
-QA must use the actual candidate desktop/web runtime with consent enabled and a
+QA must use the actual candidate desktop/web runtime with a
 local captured ingest sink. For each of srcdoc, URL preview and live artifact:
 open visible content, a genuinely blank artifact and a deterministic load/runtime
 failure; verify one attempt and exactly one joined terminal result. Hide the app,
@@ -168,7 +166,8 @@ change workspace, switch preview to source, park/switch retained frames and leav
 before completion; verify cancellation and no hidden attempts/white-screen
 results. Reactivate and verify a new ID, including repeated blank activations.
 Inject wrong-frame/old-ID messages and confirm no current result changes. Revoke
-consent and make config unavailable: no gated metric requests should be sent.
+metrics consent and make config unavailable: safety events should still report
+with private fields stripped; product analytics must remain suppressed.
 
 Navigate Home ↔ Settings ↔ Projects ↔ Tasks ↔ Plugins ↔ Community, including
 slow requests, successful empty lists, failed requests, rejected async guards,

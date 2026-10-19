@@ -66,7 +66,7 @@ an attempt metric, not a user rate. A zero or absent denominator is **not
 calculable**; do not display zero percent. Orphan results have no denominator.
 
 Use a fixed reporting cutoff and allow for late next-launch/replay delivery.
-Missing results, opt-out, disk failures, old clients and clients that never
+Missing results, disk failures, old clients and clients that never
 restart are unknown or absent, not successes. Old clients with only legacy
 observations have unknown stage capability. Their legacy version-match results
 must not be counted in the new complete-attempt cohort.
@@ -95,18 +95,18 @@ Unsupported configurations and dry runs do not create new metric records.
 Requests rejected by restart-safety preflight before reaching the updater are
 outside these stage denominators; they remain a coverage residual.
 
-New stage journaling checks `/api/analytics/config` before each write, failing
-closed on missing, rejected, malformed or timed-out consent. The desktop injects
-the existing startup session ID and product OS version; neither is guessed.
-The daemon reads consent with `readMetricsConsent` before replay/legacy classification,
-then the analytics service checks consent again. Skipped records are not replayed
-later after enabling metrics. Operational legacy installer summaries retain their
-existing behavior. No paths, URLs, prompts, contents or raw PIDs are transmitted.
+稳定性埋点沿用安全通道，不受匿名指标开关控制（`telemetry.metrics`）。
+New stage records do not read consent. The desktop injects the existing startup
+session ID and product OS version; neither is guessed. The daemon replays
+`client_update_stage_result` through `captureSafety`, including after opt-out or
+unavailable consent. Old consent/identity-skip receipts are reconsidered with the
+original insert ID; accepted safety receipts still deduplicate.
+Operational legacy product observations retain their existing
+consent policy. No paths, URLs, prompts, contents or raw PIDs are transmitted.
 The local namespace routes the journal and is stripped from the new metric.
 
 The updater never awaits the new telemetry queue. It allows at most 32 pending
-writes and at most 12 phase files per flow, with a one-second consent-read bound.
-The production callback aborts its request at that bound. The existing ten-second
+writes and at most 12 phase files per flow. The existing ten-second
 daemon timer replays at most 64 flow directories per tick for the new metric,
 rotating across the inventory (at most 768 fixed-name file reads). The incoming desktop scanner runs asynchronously once at main-window readiness,
 reads one restart-start record per stored flow and records at most 64 outcomes.
@@ -118,8 +118,8 @@ CPU/IO measurements and retention policy remain follow-up work.
 ## Local coverage and remaining acceptance
 
 Local regressions cover common-schema admission and privacy projection, failed
-enqueue retry with stable insert IDs, and skipped consent receipts that prevent
-later historical replay. Cancellation fixtures abort metadata fetching or
+enqueue retry with stable insert IDs, safety replay after metrics opt-out, and
+private-field stripping. Cancellation fixtures abort metadata fetching or
 checksum resolution; they do not claim a user-facing transfer-cancel control.
 The new contract admission regression fails on `aa88f4387` and on the previous
 candidate before registration, and passes with registration in place.
@@ -136,7 +136,7 @@ QA should use the repository's updater lifecycle harness and an isolated local
 namespace; follow the authoritative daemon-data contract in `AGENTS.md` rather
 than inventing data locations. For each applicable path/trigger:
 
-1. Start an older supported package with metrics enabled. Force metadata offline:
+1. Start an older supported package. Force metadata offline:
    one check start/result must share a flow and report `check_failed`.
 2. Retry with metadata reachable and artifact transfer disconnected: check succeeds,
    download fails and verification is unknown. Retry is a different flow.
@@ -149,8 +149,9 @@ than inventing data locations. For each applicable path/trigger:
    flow correlation. Repeat scans/restart and verify stable insert IDs/receipts.
 6. Reopen the old version without completing installation: restart is `not_applied`.
    Same-version reinstall and legacy journals must not imply new-stage success.
-7. Opt out, corrupt/unreadably configure consent, then repeat: no new metric is
-   journaled/sent. Re-enable and check that skipped historical events do not replay.
+7. Opt out, corrupt/unreadably configure consent, then repeat: new safety metrics
+   are still journaled/sent with the same schema and privacy projection.
+   Product observations must continue to honor metrics consent.
 8. Inspect remote persisted rows using an authorized read-only workflow; explicitly
    distinguish those rows from local capture mocks, queue receipts and HTTP responses.
 

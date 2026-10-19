@@ -10,9 +10,6 @@ import { z } from 'zod';
 // and `client_run_stuck` — because stability ground truth must survive a
 // user opting out of analytics.
 //
-// OPEND-3718 exception to the historical transport policy above: preview,
-// application-white-screen and chat-firstpaint now honor metrics consent.
-//
 // Everything here is a STRUCTURAL measurement: counts, durations, byte
 // lengths, error codes, enum states. No message text, no file paths, no
 // prompts, no user-authored strings of any kind ever appear in these

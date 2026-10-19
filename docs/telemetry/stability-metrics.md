@@ -114,9 +114,9 @@ raw PIDs. Main has one process UUID. No paths/content are collected. App session
 IDs are shared with launch; desktop renderer metric bootstrap obtains the native
 session ID through the host bridge (browser session identity remains separate).
 
-Opt-out is checked via daemon analytics config before each collection; unavailable
-consent fails closed. The receiving HTTP route and analytics service recheck
-memory consent too. No metrics enumeration or report occurs when disabled.
+稳定性埋点沿用安全通道，不受匿名指标开关控制（`telemetry.metrics`）。
+Memory collection, ingestion and safety capture continue when metrics is false
+or the consent config is unavailable; no consent lookup is performed.
 `before-quit`, `will-quit`, and explicit desktop shutdown stop the sampler
 idempotently, including before its first sample. No new sample or remaining batch request is sent after stop;
 in-flight HTTP is aborted, although an already-received remote event cannot be recalled.
@@ -125,8 +125,8 @@ Budget: less than 1% CPU, i.e. less than 600 ms sampler CPU per 60-second period
 Collection uses one app metrics call, one main memory read and at most 64 native
 metrics. No heap snapshots, renderer evaluation, subprocesses, retained history,
 retry queue or overlapping batches. Slow delivery skips ticks; requests time out
-in 5 seconds. Consent lookup times out in 3 seconds. Fake-clock tests cover
-cadence, long operation, opt-out, PID reuse, absent processes, slow/failing sinks
+in 5 seconds. Fake-clock tests cover
+cadence, long operation, safety capture after opt-out, PID reuse, absent processes, slow/failing sinks
 and stop. A local macOS arm64 Electron probe (isolated userData, activation prohibited,
 `show:false`, 32 ticks, main/renderer/GPU/utility present) measured 0.682 ms of
 main CPU per sample, equivalent to 0.00114% at the production cadence. This
@@ -137,11 +137,10 @@ The reproducible local probe and output are retained in the task validation logs
 The cherry-picked daemon-health memory extension remains opt-in and unarmed by
 default; it is not one of the three Electron process categories above.
 
-Memory consent reads distinguish a missing first-install config (the existing
-metrics default applies) from a corrupt, non-object, malformed-consent or
-unreadable saved config (disabled). The desktop config endpoint, memory ingestion
-route and analytics service all fail closed on unavailable consent. General
-app-config hydration retains its existing fallback defaults.
+Product analytics retains its consent checks, including fail-closed config reads.
+The optional daemon-health sampler remains unarmed by default. Safety capture
+still requires the existing PostHog key/environment gates; missing credentials
+do not trigger network traffic. Content consent and privacy projection are unchanged.
 
 ## Envelope and verification
 
