@@ -9,6 +9,9 @@
 // and `client_run_stuck` — because stability ground truth must survive a
 // user opting out of analytics.
 //
+// OPEND-3718 exception to the historical transport policy above: preview,
+// application-white-screen and chat-firstpaint now honor metrics consent.
+//
 // Everything here is a STRUCTURAL measurement: counts, durations, byte
 // lengths, error codes, enum states. No message text, no file paths, no
 // prompts, no user-authored strings of any kind ever appear in these
@@ -55,7 +58,8 @@ export type ChatMeasurementDoubt =
   /** A stylesheet was still in flight — layout was not final. */
   | 'stylesheets_pending'
   /** Restored from bfcache; the clock origin is not the user's open. */
-  | 'bfcache_restore';
+  | 'bfcache_restore'
+  | 'missing_open_intent';
 
 /**
  * Attached to every timing-sensitive event. Headline dashboard numbers MUST
@@ -144,6 +148,9 @@ export interface ChatFirstPaintProps
   extends ChatCorrelationProps,
     ChatMeasurementTrustProps {
   open_kind: ChatOpenKind;
+  /** Explicit intent is comparable separately from an effect-local fallback. */
+  timing_origin?: 'navigation_intent' | 'surface_attach_fallback';
+  metric_schema_version?: 1;
   /** Open intent (route/conversation change) → first message row painted. */
   duration_ms: number;
   /** Messages in the conversation being opened. */

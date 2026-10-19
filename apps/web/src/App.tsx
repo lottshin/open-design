@@ -1759,8 +1759,8 @@ function AppInner() {
   // every subsequent capture() a no-op. When the user opts back in we
   // call opt_in_capturing to resume.
   useEffect(() => {
-    analytics.setConsent(config.telemetry?.metrics === true);
-  }, [analytics.setConsent, config.telemetry?.metrics]);
+    analytics.setConsent(daemonAppConfigReady && config.telemetry?.metrics === true);
+  }, [analytics.setConsent, daemonAppConfigReady, config.telemetry?.metrics]);
 
   // Sync PostHog's distinct_id with the anonymous installationId, both on
   // first opt-in (when the daemon stamps a fresh id) and on Delete-my-data

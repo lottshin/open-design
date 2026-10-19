@@ -1,3 +1,4 @@
+import { instrumentLivePreview } from '../live-artifacts/preview-metrics.js';
 import type { Express } from 'express';
 import type { RouteDeps } from '../server-context.js';
 import type {
@@ -84,7 +85,7 @@ export function registerLiveArtifactRoutes(app: Express, ctx: RegisterLiveArtifa
         artifactId: req.params.artifactId,
       });
       setLiveArtifactPreviewHeaders(res);
-      res.status(200).send(record.html);
+      res.status(200).send(instrumentLivePreview(record.html));
     } catch (err: any) {
       sendLiveArtifactRouteError(res, err);
     }

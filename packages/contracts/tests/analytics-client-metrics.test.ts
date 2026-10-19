@@ -80,3 +80,14 @@ describe('CS01 client metric contracts', () => {
     });
   });
 });
+
+it('admits preview denominators and four results with nullable unknown kind, stripping private fields', () => {
+  const fields = { ...common, preview_attempt_id: 'preview-1', render_mode: 'srcdoc',
+    artifact_kind: null, started_at: common.occurred_at, url: 'private', prompt: 'private' };
+  expect(parseClientMetricEvent('client_preview_attempt', fields)).toMatchObject({ artifact_kind: null });
+  for (const result of ['success', 'white_screen', 'error', 'cancelled']) {
+    const parsed = parseClientMetricEvent('client_preview_result', { ...fields, result, duration_ms: 200, monitoring_kind: 'visible_content' });
+    expect(parsed).not.toBeNull(); expect(parsed).not.toHaveProperty('url'); expect(parsed).not.toHaveProperty('prompt');
+  }
+  expect(parseClientMetricEvent('client_preview_result', { ...fields, result: 'success', duration_ms: -1 })).toBeNull();
+});

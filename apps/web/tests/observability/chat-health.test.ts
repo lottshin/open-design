@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   clearExceptionTrackingContext,
   setExceptionTrackingContext,
+  setClientMetricsConsent,
 } from '../../src/analytics/error-tracking';
 import {
   __resetChatHealthForTest,
@@ -115,12 +116,14 @@ function buildChatLog(rows: number): HTMLElement {
 }
 
 beforeEach(() => {
+  setClientMetricsConsent(true);
   clock = 0;
   longTaskCallbacks = [];
   fetchMock.mockReset();
   fetchMock.mockResolvedValue(new Response('', { status: 200 }));
   globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
   setExceptionTrackingContext({
+    metricsEnabled: true,
     apiKey: 'phc_test',
     host: 'https://us.i.posthog.com',
     distinctId: 'chat-health-test',
@@ -140,6 +143,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  setClientMetricsConsent(false);
   __resetChatHealthForTest();
   vi.useRealTimers();
   vi.restoreAllMocks();
@@ -173,6 +177,7 @@ describe('observability/chat-health — first paint', () => {
     handle.markFirstPaint({ renderedRowCount: 12 });
 
     const [paint] = eventsNamed('client_chat_first_paint');
+    expect(paint?.timing_origin).toBe('navigation_intent');
     expect(paint).toBeDefined();
     expect(paint?.duration_ms).toBe(1000);
     expect(paint?.open_kind).toBe('conversation_switch');
@@ -203,6 +208,9 @@ describe('observability/chat-health — first paint', () => {
     const handle = openChatSurface({ element: log, messageCount: 1, virtualized: false });
     handle.markFirstPaint({ renderedRowCount: 1 });
     expect(eventsNamed('client_chat_first_paint')[0]?.open_kind).toBe('remount');
+    expect(eventsNamed('client_chat_first_paint')[0]?.timing_origin).toBe('surface_attach_fallback');
+    expect(eventsNamed('client_chat_first_paint')[0]?.measurement_trusted).toBe(false);
+    expect(eventsNamed('client_chat_first_paint')[0]?.untrusted_reason).toBe('missing_open_intent');
   });
 });
 
