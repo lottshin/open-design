@@ -2,11 +2,13 @@
 import { reportSafetyEvent } from '../analytics/error-tracking';
 
 let consent = false;
+let consentEpoch = 0;
 let consentRevision = 0;
 let consentRequest: AbortController | null = null;
 const listeners = new Set<(enabled: boolean) => void>();
 export function setResponsivenessConsent(enabled: boolean): void {
   if (consent === enabled) return;
+  consentEpoch += 1;
   consent = enabled;
   for (const listener of listeners) listener(enabled);
 }
@@ -43,7 +45,12 @@ export function reportResponsiveness(event: string, props: Record<string, unknow
   if (!consent) return;
   // The existing transport builds the common envelope and validates registered
   // metric schemas with parseClientMetricEvent, stripping URLs and extra fields.
-  reportSafetyEvent(event, { metric_schema_version: 1, ...props }, { currentUrlOverride: '' });
+  const epoch = consentEpoch;
+  reportSafetyEvent(event, { metric_schema_version: 1, ...props }, {
+    currentUrlOverride: '',
+    // A later re-grant must not release samples buffered under an older grant.
+    shouldSend: () => consent && consentEpoch === epoch,
+  });
 }
 
 /** Long timer gaps are ambiguous (sleep OR blockage), never qualified exposure. */

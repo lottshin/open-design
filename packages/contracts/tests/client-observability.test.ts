@@ -14,3 +14,24 @@ it('preserves null unmeasurable counts and rejects negative counts', () => {
   expect(parseClientMetricEvent('client_responsiveness_window', fields)).toMatchObject({ long_task_count: null });
   expect(parseClientMetricEvent('client_responsiveness_window', { ...fields, long_task_count: -1 })).toBeNull();
 });
+
+it('admits recovery and frame summaries without conflating them with a frozen event', () => {
+  expect(parseClientMetricEvent('client_responsiveness_recovery', {
+    ...common, recovery_id: 'recovery-test', previous_occurred_at: '2026-10-18T00:00:00.000Z',
+    duration_ms: null, severe_task_count: 0, reason: 'unclean_exit_unknown',
+  })).toMatchObject({ duration_ms: null, reason: 'unclean_exit_unknown' });
+  expect(parseClientMetricEvent('client_chat_scroll_frames', {
+    ...common, measurable: true, window_ms: 30_000, frame_count: 3,
+    interval_count: 2, over_50ms_count: 1, max_frame_interval_ms: 80,
+    sampling_truncated: false, frozen: true,
+  })).not.toHaveProperty('frozen');
+  expect(parseClientMetricEvent('client_chat_scroll_frozen', common)).toBeNull();
+});
+
+it('rejects slow counts that exceed the qualified sample denominator', () => {
+  expect(parseClientMetricEvent('client_input_responsiveness', {
+    ...common, area: 'composer', window_ms: 30_000, input_attempt_count: 1,
+    qualified_sample_count: 0, over_500ms_count: 1,
+    max_input_to_presentation_ms: 600, max_queue_delay_ms: null, sample_floor_ms: 16,
+  })).toBeNull();
+});

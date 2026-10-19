@@ -109,6 +109,7 @@ interface ExceptionTrackingContext {
 }
 
 interface BufferedSafetyEvent {
+  shouldSend?: () => boolean;
   eventName: string;
   body: { properties: Record<string, unknown> };
   timestamp: string;
@@ -273,8 +274,9 @@ function captureException(
 export function reportSafetyEvent(
   eventName: string,
   properties: Record<string, unknown> = {},
-  options: { currentUrlOverride?: string } = {},
+  options: { currentUrlOverride?: string; shouldSend?: () => boolean } = {},
 ): void {
+  if (options.shouldSend && !options.shouldSend()) return;
   reportExperienceEvent(eventName, properties);
   const merged: Record<string, unknown> = {
     ...properties,
@@ -285,12 +287,13 @@ export function reportSafetyEvent(
     $insert_id: typeof properties.event_id === 'string' ? properties.event_id : randomId(),
     capture_source: 'web/error-tracking',
   };
-  enqueue(eventName, merged);
+  enqueue(eventName, merged, options.shouldSend);
 }
 
-function enqueue(eventName: string, properties: Record<string, unknown>): void {
+function enqueue(eventName: string, properties: Record<string, unknown>, shouldSend?: () => boolean): void {
   const timestamp = new Date().toISOString();
   const item: BufferedSafetyEvent = {
+    shouldSend,
     eventName,
     body: { properties },
     timestamp,
@@ -304,7 +307,7 @@ function enqueue(eventName: string, properties: Record<string, unknown>): void {
 }
 
 function dispatch(item: BufferedSafetyEvent): void {
-  if (context == null) return;
+  if (context == null || (item.shouldSend && !item.shouldSend())) return;
   const original = item.body.properties;
   const common = buildClientTelemetryParams(original, {
     eventId: String(original.$insert_id), deviceId: context.distinctId,

@@ -1,4 +1,8 @@
 import { z } from 'zod';
+import {
+  responsivenessWindowFields, inputResponsivenessFields,
+  scrollFrameFields, responsivenessRecoveryFields,
+} from './client-observability.js';
 import { releaseChannelFromVersion } from '@open-design/release';
 
 /** Additive metric revision; historical event_schema_version 2/4 is never rewritten. */
@@ -86,6 +90,11 @@ const memorySchema = metricCommonSchema.extend({
 });
 
 export const CLIENT_METRIC_SCHEMAS = {
+  client_responsiveness_window: metricCommonSchema.extend(responsivenessWindowFields),
+  client_input_responsiveness: metricCommonSchema.extend(inputResponsivenessFields)
+    .refine((value) => value.over_500ms_count <= value.qualified_sample_count),
+  client_chat_scroll_frames: metricCommonSchema.extend(scrollFrameFields),
+  client_responsiveness_recovery: metricCommonSchema.extend(responsivenessRecoveryFields),
   client_launch_attempt: launchAttemptSchema,
   client_business_ready: businessReadySchema,
   client_launch_result: launchResultSchema,
