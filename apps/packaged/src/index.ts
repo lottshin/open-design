@@ -334,6 +334,7 @@ async function main(): Promise<void> {
     return;
   }
   await app.whenReady();
+  const electronReadyAtMs = performance.now();
   packagedStartupTiming?.mark("electron_ready");
 
   // Show the brand splash IMMEDIATELY, before we await the daemon/web sidecars
@@ -425,6 +426,7 @@ async function main(): Promise<void> {
     return await desktopHandle.invoke(action, input);
   };
   const launchDesktop = async (): Promise<DesktopMainHandle> => await runDesktopMain(runtime, {
+    electronReadyAtMs,
     startupTiming: deferredHeadless ? null : packagedStartupTiming ?? undefined,
     splashWindow: splash?.window,
     splashStartedAt: splash?.startedAt,

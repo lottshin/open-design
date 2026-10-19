@@ -78,3 +78,16 @@ it("does not create a process launch for deferred restores, including a failed r
   await expect(restore()).resolves.toBe("restored");
   expect(create).not.toHaveBeenCalled();
 });
+
+it('passes the original Electron ready timestamp through the packaged desktop boundary', () => {
+  const ready = select(node => ts.isVariableDeclaration(node) && node.name.getText(ast) === 'electronReadyAtMs') as ts.VariableDeclaration;
+  const option = select(node => ts.isShorthandPropertyAssignment(node) && node.name.text === 'electronReadyAtMs');
+  const readyAt = evaluate(ready.initializer!.getText(ast), { performance: { now: () => 10_000 } });
+  const passed = evaluate(`({ ${option.getText(ast)} })`, { electronReadyAtMs: readyAt });
+  expect(passed).toEqual({ electronReadyAtMs: 10_000 });
+  const readyIndex = source.indexOf('await app.whenReady()');
+  const clockIndex = source.indexOf('const electronReadyAtMs');
+  const sidecarsIndex = source.indexOf('await startPackagedSidecars');
+  expect(readyIndex).toBeLessThan(clockIndex);
+  expect(clockIndex).toBeLessThan(sidecarsIndex);
+});

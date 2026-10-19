@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { BrowserWindow, Menu, app, dialog, globalShortcut, ipcMain, powerMonitor, shell, type MenuItemConstructorOptions } from "electron";
 import { attachStartupReadyIpc, createStartupTiming, type StartupTiming } from "./startup-timing.js";
 import { beginLaunchMarker } from "./launch-type.js";
-import { startMemorySampler } from "./memory-sampler.js";
+import { startMemorySampler, readMemorySamplingConsent } from "./memory-sampler.js";
 export { createStartupTiming, type StartupTiming } from "./startup-timing.js";
 
 import {
@@ -198,6 +198,7 @@ export function applyLoopbackConnectionLimitSwitch(electronApp: Electron.App): v
 }
 
 export type DesktopMainOptions = {
+  electronReadyAtMs?: number;
   /** Carries the packaged process origin and sidecar phases into desktop. */
   startupTiming?: StartupTiming | null;
   beforeShutdown?: (record?: (event: UpdateLifecycleObservation) => Promise<void>) => Promise<void>;
@@ -735,17 +736,14 @@ async function runDesktopMainWithTiming(
   await app.whenReady();
   startupTiming.mark("electron_ready");
   const memorySampler = startMemorySampler({
+    readyAtMs: options.electronReadyAtMs ?? performance.now(),
     context: { app_session_id: startupTiming.context().app_session_id, app_version: options.update?.currentVersion ?? app.getVersion(),
       environment: null, platform: process.platform, arch: process.arch, os_version: process.getSystemVersion() },
     app,
     getManagedRendererPids: () => BrowserWindow.getAllWindows()
       .filter(window => !window.isDestroyed() && !window.webContents.isDestroyed())
       .map(window => window.webContents.getOSProcessId()),
-    isEnabled: async () => {
-      const base = await resolveDaemonBaseUrl(options)();
-      const response = await fetch(new URL("/api/analytics/config", base), { signal: AbortSignal.timeout(3000) });
-      return response.ok && (await response.json() as { enabled?: boolean }).enabled === true;
-    },
+    isEnabled: signal => readMemorySamplingConsent(resolveDaemonBaseUrl(options), signal),
     report: async (samples, signal) => {
       for (const sample of samples) {
         if (signal.aborted) break;

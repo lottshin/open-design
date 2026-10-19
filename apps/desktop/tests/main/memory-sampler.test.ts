@@ -151,3 +151,56 @@ it('the actual before-quit and will-quit listeners stop collection before its fi
     expect(report).not.toHaveBeenCalled();
   }
 });
+
+it('aborts the actual consent fetch and response body when stopped', async () => {
+  const samplerModule = await import('../../src/main/memory-sampler.js');
+  const { readFileSync } = await import('node:fs');
+  const { runInNewContext } = await import('node:vm');
+  const ts = await import('typescript');
+  const source = readFileSync(new URL('../../src/main/index.ts', import.meta.url), 'utf8');
+  const ast = ts.createSourceFile('index.ts', source, ts.ScriptTarget.Latest, true);
+  let callback = '';
+  function visit(node: import('typescript').Node) {
+    if (!callback && ts.isPropertyAssignment(node) && node.name.getText(ast) === 'isEnabled') callback = node.initializer.getText(ast);
+    ts.forEachChild(node, visit);
+  }
+  visit(ast);
+  expect(callback).not.toBe('');
+  vi.useFakeTimers();
+  let requestSignal!: AbortSignal;
+  const fetcher = vi.fn(async (_url, init) => {
+    requestSignal = init.signal;
+    return { ok: true, json: () => new Promise((_resolve, reject) => requestSignal.addEventListener('abort', () => reject(new Error('aborted')))) };
+  });
+  vi.stubGlobal('fetch', fetcher);
+  const report = vi.fn();
+  const sampler = startMemorySampler({ context, app: { getAppMetrics: () => [] }, getManagedRendererPids: () => [],
+    isEnabled: runInNewContext(ts.transpileModule(`(${callback})`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, { options: {}, fetch: fetcher, URL, AbortSignal,
+      readMemorySamplingConsent: samplerModule.readMemorySamplingConsent,
+      resolveDaemonBaseUrl: () => async () => 'http://localhost:1234',
+    }), report });
+  try {
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(requestSignal.aborted).toBe(false);
+    sampler.stop();
+    expect(requestSignal.aborted).toBe(true);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(report).not.toHaveBeenCalled();
+  } finally { sampler.stop(); vi.unstubAllGlobals(); }
+});
+
+it.each([20_000, 40_000])('uses Electron ready as first-sample origin after %dms of sidecar boot', async (elapsed) => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'performance'] });
+  const readyAtMs = performance.now();
+  await vi.advanceTimersByTimeAsync(elapsed);
+  const report = vi.fn();
+  const sampler = startMemorySampler({ context, app: { getAppMetrics: () => [] }, getManagedRendererPids: () => [], report, readyAtMs });
+  const remaining = Math.max(0, 30_000 - elapsed);
+  if (remaining) {
+    await vi.advanceTimersByTimeAsync(remaining - 1);
+    expect(report).not.toHaveBeenCalled();
+  }
+  await vi.advanceTimersByTimeAsync(remaining ? 1 : 0);
+  expect(report).toHaveBeenCalledOnce();
+  sampler.stop();
+});
