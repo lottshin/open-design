@@ -48,7 +48,10 @@ import type {
   ChatStreamHealthProps,
 } from '@open-design/contracts/analytics';
 
-import { reportResponsiveness, responsivenessVisible } from './responsiveness';
+import {
+  onResponsivenessConsent, reportResponsiveness,
+  responsivenessConsent, responsivenessVisible,
+} from './responsiveness';
 import {
   chatBreadcrumbTrail,
   chatCorrelation,
@@ -232,6 +235,7 @@ class ChatSurface implements ChatSurfaceHandle {
   private sampleTimer: ReturnType<typeof setInterval> | null = null;
 
   private longTaskObserver: PerformanceObserver | null = null;
+  private stopConsent: (() => void) | null = null;
   private activeRunId: string | null = null;
   private windowStartedAt = 0;
   private windowBlockedMs = 0;
@@ -266,7 +270,13 @@ class ChatSurface implements ChatSurfaceHandle {
       schedule(() => this.sample('interval'));
     }, SAMPLE_INTERVAL_MS);
 
-    this.installLongTaskObserver();
+    this.stopConsent = onResponsivenessConsent((enabled) => {
+      this.stopLongTaskObserver();
+      // Samples from an earlier grant must not escape after re-grant.
+      this.resetStreamWindow();
+      if (enabled) this.installLongTaskObserver();
+    });
+    if (responsivenessConsent()) this.installLongTaskObserver();
 
     if (typeof document !== 'undefined') {
       this.onVisibilityChange = () => {
@@ -285,6 +295,7 @@ class ChatSurface implements ChatSurfaceHandle {
   markFirstPaint(input: { renderedRowCount: number }): void {
     if (this.detached || this.paintReported) return;
     this.paintReported = true;
+    if (!responsivenessConsent()) return;
     pushChatBreadcrumb('first_paint');
     const props: ChatFirstPaintProps = {
       ...chatCorrelation(),
@@ -318,7 +329,7 @@ class ChatSurface implements ChatSurfaceHandle {
   }
 
   sample(reason: ChatSampleReason): void {
-    if (this.detached) return;
+    if (this.detached || !responsivenessConsent()) return;
     const domNodeCount = this.countDescendants();
     const heap = readHeap();
 
@@ -395,16 +406,22 @@ class ChatSurface implements ChatSurfaceHandle {
     if (this.streamTimer != null) clearInterval(this.streamTimer);
     this.sampleTimer = null;
     this.streamTimer = null;
+    this.stopConsent?.();
+    this.stopConsent = null;
+    this.stopLongTaskObserver();
+    if (activeSurface === this) activeSurface = null;
+  }
+
+  // -- internals ------------------------------------------------------------
+
+  private stopLongTaskObserver(): void {
     try {
       this.longTaskObserver?.disconnect();
     } catch {
       // best-effort — teardown must never propagate
     }
     this.longTaskObserver = null;
-    if (activeSurface === this) activeSurface = null;
   }
-
-  // -- internals ------------------------------------------------------------
 
   private installLongTaskObserver(): void {
     if (typeof PerformanceObserver === 'undefined') return;

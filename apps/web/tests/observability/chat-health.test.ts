@@ -417,3 +417,24 @@ it('does not report chat health while metrics consent is withdrawn', () => {
   expect(eventsNamed('client_chat_dom_growth')).toHaveLength(0);
   handle.detach();
 });
+
+it('disconnects chat health collection on opt-out and discards the previous grant window', () => {
+  const handle = openChatSurface({ element: buildChatLog(1), messageCount: 1, virtualized: false });
+  handle.runStarted('run-consent');
+  advanceClock(1_000);
+  emitLongTask(600);
+  expect(longTaskCallbacks).toHaveLength(1);
+  setResponsivenessConsent(false);
+  expect(longTaskCallbacks).toHaveLength(0);
+  const census = vi.spyOn(document.querySelector('.chat-log')!, 'getElementsByTagName');
+  handle.sample('interval');
+  expect(census).not.toHaveBeenCalled();
+  advanceClock(1_000);
+  setResponsivenessConsent(true);
+  expect(longTaskCallbacks).toHaveLength(1);
+  advanceClock(1_000);
+  handle.runEnded('run-consent');
+  expect(eventsNamed('client_chat_stream_health')).toHaveLength(0);
+  handle.detach();
+  expect(longTaskCallbacks).toHaveLength(0);
+});
