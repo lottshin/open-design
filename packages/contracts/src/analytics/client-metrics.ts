@@ -100,6 +100,7 @@ const memorySchema = metricCommonSchema.extend({
   uptime_ms: measurement,
   rss_bytes: bytes,
   heap_used_bytes: bytes,
+  heap_limit_bytes: bytes.optional(),
   external_bytes: bytes,
   sampled_at: time,
   sampling_interval_ms: z.number().finite().positive(),
@@ -119,6 +120,8 @@ export function isProcessExitEventName(event: string): boolean {
 
 const processExitSchema = metricCommonSchema.extend({
   launch_attempt_id: token.nullable(),
+  process_instance_id: token.nullable().optional(),
+  signal: z.string().max(24).regex(/^SIG[A-Z0-9]+$/).nullable().optional(),
   previous_app_version: version.nullable(),
   process_role: z.enum(['main', 'renderer', 'gpu', 'utility', 'daemon', 'web', 'unknown']),
   reason: z.enum(['crash', 'oom', 'killed', 'clean-exit', 'recovery-attempt', 'unknown']),
@@ -144,7 +147,9 @@ export function processExitMetricFields(event: string, props: Record<string, unk
     source_event: event, exit_code: typeof props.exit_code === 'number' ? props.exit_code : null,
     recovery_suppressed: props.recovery_suppressed === true || props.loop_tripped === true,
     occurrence_time_source: props.occurrence_time_source ?? (backfill ? 'unknown' : 'observed'),
-    is_backfill: backfill,
+    is_backfill: typeof props.is_backfill === 'boolean' ? props.is_backfill : backfill,
+    ...(props.process_instance_id !== undefined ? { process_instance_id: props.process_instance_id } : {}),
+    ...(props.signal !== undefined ? { signal: props.signal } : {}),
   };
 }
 

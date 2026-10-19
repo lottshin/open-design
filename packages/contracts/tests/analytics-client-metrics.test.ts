@@ -108,3 +108,18 @@ it('admits preview denominators and four results with nullable unknown kind, str
   }
   expect(parseClientMetricEvent('client_preview_result', { ...fields, result: 'success', duration_ms: -1 })).toBeNull();
 });
+
+
+it('retains nullable heap limits and opaque exit correlation, stripping private fields', async () => {
+  const { processExitMetricFields } = await import('../src/analytics/client-metrics.js');
+  for (const heap_limit_bytes of [null, 4096]) {
+    expect(parseClientMetricEvent('client_process_memory_sample', { ...memory, heap_limit_bytes }))
+      .toMatchObject({ heap_limit_bytes });
+  }
+  const parsed = parseClientMetricEvent('client_process_exit', { ...common,
+    ...processExitMetricFields('daemon_unclean_exit', { reason: 'killed', process_instance_id: 'opaque-boot',
+      signal: 'SIGKILL', is_backfill: false, occurrence_time_source: 'observed' }),
+    pid: 987654, path: '/private/secret', content: 'secret input' });
+  expect(parsed).toMatchObject({ process_instance_id: 'opaque-boot', signal: 'SIGKILL', is_backfill: false });
+  for (const key of ['pid', 'path', 'content']) expect(parsed).not.toHaveProperty(key);
+});

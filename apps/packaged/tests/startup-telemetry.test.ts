@@ -16,12 +16,13 @@ import { parseClientMetricEvent } from '@open-design/contracts/analytics';
  *
  * @see apps/packaged/src/startup-telemetry.ts
  */
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  reportDaemonExit,
   STARTUP_FAILURE_EVENT,
   captureStartupFailure,
   classifyStartupFailure,
@@ -836,4 +837,66 @@ it.each(['daemon', 'web'])('correlates injected %s startup failure with its laun
   expect(exit.properties).toMatchObject({ app_session_id: 'session-1', launch_attempt_id: 'launch-1',
     app_version: '1.0.0-beta.1', reason: 'crash', process_role: role });
   for (const key of ['log_path', 'native_module_path', 'error_stack', 'error_message', 'daemon_log_tail', 'pid']) expect(exit.properties).not.toHaveProperty(key);
+});
+
+
+describe('runtime daemon death safety capture', () => {
+  const observation = {
+    process_instance_id: '00000000-0000-4000-8000-000000000001',
+    app_session_id: 'dead-session', launch_attempt_id: 'dead-launch', app_version: '1.2.3',
+    occurred_at: '2026-10-19T01:02:03.000Z', exit_code: null, signal: 'SIGKILL', reason: 'killed' as const,
+    delivered: false,
+  };
+  it.each([200, 503])('persists evidence and acknowledges only successful HTTP (%s)', async status => {
+    const root = mkdtempSync(join(tmpdir(), 'od-runtime-exit-'));
+    try {
+      writeFileSync(join(root, 'installation.json'), JSON.stringify({ installationId: 'installation-1' }));
+      writeFileSync(join(root, 'app-config.json'), JSON.stringify({ telemetry: { metrics: false } }));
+      const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(new Response('', { status }));
+      await reportDaemonExit({ dataRoot: root, installationRoot: root, namespace: 'test',
+        posthogKey: 'test-key', posthogHost: 'https://capture.invalid',
+        observation: { ...observation, pid: 987654, content: 'private-content', path: '/private/path' } as typeof observation },
+        { fetchImpl });
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+      const body = JSON.parse(fetchImpl.mock.calls[0]![1]!.body as string);
+      expect(body.properties).toMatchObject({ process_role: 'daemon', reason: 'killed', signal: 'SIGKILL',
+        process_instance_id: observation.process_instance_id, app_session_id: 'dead-session', launch_attempt_id: 'dead-launch',
+        occurred_at: observation.occurred_at, occurrence_time_source: 'observed', is_backfill: false,
+        event_id: `${observation.process_instance_id}-unclean-exit:exit`,
+        $insert_id: `${observation.process_instance_id}-unclean-exit:exit` });
+      expect(parseClientMetricEvent(body.event, body.properties)).not.toBeNull();
+      for (const field of ['pid', 'path', 'content', 'delivered']) expect(body.properties).not.toHaveProperty(field);
+      expect(JSON.parse(readFileSync(join(root, 'diagnostics', 'daemon-exit-observation.json'), 'utf8')))
+        .toEqual({ ...observation, delivered: status === 200 });
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+  it('does not recreate consumed evidence after a delayed acknowledgement', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'od-runtime-exit-'));
+    let resolve!: (response: Response) => void;
+    try {
+      const sending = reportDaemonExit({ dataRoot: root, installationRoot: root, namespace: 'test',
+        posthogKey: 'test', posthogHost: null, observation }, { fetchImpl: () => new Promise(r => { resolve = r; }) });
+      const path = join(root, 'diagnostics', 'daemon-exit-observation.json');
+      rmSync(path); resolve(new Response('', { status: 200 })); await sending;
+      expect(() => readFileSync(path)).toThrow();
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+});
+
+
+it('uses explicit same-instance V8 OOM evidence before runtime signal capture', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'od-runtime-oom-'));
+  const instanceId = '00000000-0000-4000-8000-000000000002';
+  try {
+    mkdirSync(join(root, 'diagnostics', 'fatal-reports'), { recursive: true });
+    writeFileSync(join(root, 'diagnostics', 'daemon-health.json'), JSON.stringify({ bootId: instanceId, pid: 987654, startedAt: Date.now() - 1000 }));
+    writeFileSync(join(root, 'diagnostics', 'fatal-reports', 'report.json'), JSON.stringify({ header: { processId: 987654, trigger: 'OOMError' } }));
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(new Response('', { status: 200 }));
+    await reportDaemonExit({ dataRoot: root, installationRoot: root, namespace: 'test', posthogKey: 'test', posthogHost: null,
+      observation: { process_instance_id: instanceId, app_session_id: null, launch_attempt_id: null, app_version: '1.2.3',
+        occurred_at: new Date().toISOString(), exit_code: null, signal: 'SIGABRT', reason: 'killed', delivered: false } }, { fetchImpl });
+    const body = JSON.parse(fetchImpl.mock.calls[0]![1]!.body as string);
+    expect(body.properties).toMatchObject({ reason: 'oom', signal: 'SIGABRT' });
+    expect(JSON.stringify(body)).not.toContain('987654');
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

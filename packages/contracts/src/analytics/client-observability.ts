@@ -591,3 +591,18 @@ export const responsivenessRecoveryFields = {
   duration_ms: ms.nullable(), severe_task_count: count,
   reason: z.enum(['unclean_exit_unknown', 'observed_severe_task']),
 };
+
+
+/** Parent-owned death observation; no PID, path or diagnostic content. */
+export const daemonExitObservationSchema = z.object({
+  process_instance_id: z.string().uuid(),
+  app_session_id: z.string().min(1).max(128).regex(/^[a-zA-Z0-9_.:-]+$/).nullable(),
+  launch_attempt_id: z.string().min(1).max(128).regex(/^[a-zA-Z0-9_.:-]+$/).nullable(),
+  app_version: z.string().min(1).max(128).nullable(),
+  occurred_at: z.string().datetime({ offset: true }),
+  exit_code: z.number().int().nullable(),
+  signal: z.string().max(24).regex(/^SIG[A-Z0-9]+$/).nullable(),
+  reason: z.enum(['killed', 'crash', 'oom', 'clean-exit', 'unknown']),
+  delivered: z.boolean(),
+});
+export type DaemonExitObservation = z.infer<typeof daemonExitObservationSchema>;

@@ -1,4 +1,5 @@
 import type { UpdateLifecycleObservation } from "@open-design/desktop/main";
+import { randomUUID } from "node:crypto";
 import type { ChildProcess } from "node:child_process";
 import { access, appendFile, mkdir, open, rename, type FileHandle } from "node:fs/promises";
 import { createRequire } from "node:module";
@@ -39,6 +40,7 @@ import {
   resolveDaemonPrewarmTargets,
   resolveWebPrewarmTargets,
 } from "./prewarm.js";
+import { reportDaemonExit } from "./startup-telemetry.js";
 import { workspaceTeamTransportEnv } from "./workspace-team.js";
 
 const require = createRequire(import.meta.url);
@@ -117,6 +119,7 @@ type ManagedSidecarChild = {
   logHandle: FileHandle;
   logPath: string;
   stamp: SidecarStamp;
+  daemonExitObserver?: ReturnType<typeof observeDaemonExit>;
 };
 
 type PackagedDaemonManagedPathEnv = {
@@ -812,7 +815,38 @@ export function createPackagedSidecarSpawnOptions(input: {
   };
 }
 
+/** Attach before readiness; intentional shutdown is marked before requesting stop. */
+export function observeDaemonExit(
+  child: { exitCode: number | null; signalCode: NodeJS.Signals | null;
+    once(event: 'exit', listener: (code: number | null, signal: NodeJS.Signals | null) => void): unknown },
+  report: (exit: { exit_code: number | null; signal: NodeJS.Signals | null; intentional: boolean; occurred_at: string; reason: 'killed' | 'crash' | 'clean-exit' | 'unknown' }) => Promise<void>,
+) {
+  let ready = false;
+  let intentional = false;
+  let exited = child.exitCode !== null || child.signalCode !== null;
+  let delivery = Promise.resolve();
+  child.once('exit', (code, signal) => {
+    if (exited) return;
+    exited = true;
+    if (!ready) return;
+    const reason = intentional ? 'clean-exit' : signal ? 'killed' : code === 0 ? 'clean-exit' : code !== null ? 'crash' : 'unknown';
+    const exit = { exit_code: code, signal, intentional, occurred_at: new Date().toISOString(), reason } as const;
+    // Invoke synchronously so the reporter can persist before yielding to network I/O.
+    try { delivery = report(exit).catch(() => undefined); } catch {}
+  });
+  return {
+    markReady(): boolean {
+      if (exited || child.exitCode !== null || child.signalCode !== null) return false;
+      ready = true;
+      return true;
+    },
+    beginShutdown(): void { intentional = true; },
+    flush(): Promise<void> { return delivery; },
+  };
+}
+
 export async function closeManagedChild(child: ManagedSidecarChild, observe?: (event: UpdateLifecycleObservation) => Promise<void>): Promise<void> {
+  child.daemonExitObserver?.beginShutdown();
   const startedAt = Date.now();
   const appendLifecycleLog = async (message: string): Promise<void> => appendSidecarLifecycleLog(child.logPath, message);
   try {
@@ -834,6 +868,7 @@ export async function closeManagedChild(child: ManagedSidecarChild, observe?: (e
     }
     await appendLifecycleLog(`[open-design packaged] exited app=${child.app} pid=${child.child.pid ?? "unknown"} code=${child.child.exitCode ?? "unknown"} signal=${child.child.signalCode ?? "none"}`);
   } finally {
+    await child.daemonExitObserver?.flush();
     await child.logHandle.close().catch(() => undefined);
   }
 }
@@ -938,11 +973,12 @@ export async function startPackagedSidecars(
     );
 
     options.onPhase?.("daemon-spawning");
+    const processInstanceId = randomUUID();
     const daemon = await spawnSidecarChild({
       app: APP_KEYS.DAEMON,
       channel,
       entryPath: daemonSidecarEntry,
-      env: buildPackagedDaemonSpawnEnv(paths, {
+      env: { OD_DAEMON_PROCESS_INSTANCE_ID: processInstanceId, ...buildPackagedDaemonSpawnEnv(paths, {
         launchContext: options.launchContext,
         appVersion: options.appVersion,
         amrProfile: options.amrProfile,
@@ -958,12 +994,23 @@ export async function startPackagedSidecars(
         posthogHost: options.posthogHost,
         velaWebUrl: options.velaWebUrl,
         velaWebUrls: options.velaWebUrls,
-      }),
+      }) },
       electronNodeCommand: options.electronNodeCommand,
       nodeCommand: options.nodeCommand,
       paths,
       runtime,
     });
+    daemon.daemonExitObserver = observeDaemonExit(daemon.child, (exit) => reportDaemonExit({
+      dataRoot: paths.dataRoot, installationRoot: paths.installationRoot, namespace: runtime.namespace,
+      posthogKey: options.posthogKey, posthogHost: options.posthogHost, logPath: daemon.logPath,
+      observation: { process_instance_id: processInstanceId,
+        app_session_id: options.launchContext?.app_session_id ?? null,
+        launch_attempt_id: options.launchContext?.launch_attempt_id ?? null,
+        app_version: options.appVersion, occurred_at: exit.occurred_at,
+        exit_code: exit.exit_code, signal: exit.signal,
+        reason: exit.reason,
+        delivered: false },
+    }));
     children.push(daemon);
     // The web prewarm overlaps the daemon's boot wait: its read set (web
     // sidecar dist, .next/server chunks, Next framework code) is disjoint
@@ -994,6 +1041,7 @@ export async function startPackagedSidecars(
       { child: daemon.child, logPath: logPathFor(paths, APP_KEYS.DAEMON) },
     );
     if (daemonStatus.url == null) throw new Error("daemon did not report a URL");
+    if (!daemon.daemonExitObserver.markReady()) throw new Error("daemon exited before ready status could be promoted");
     options.onPhase?.("daemon-ready");
 
     // The web payload must be in the page cache before the web sidecar
@@ -1056,6 +1104,7 @@ export async function startPackagedSidecars(
       web: webStatus,
       currentWebUrl: supervisor.currentUrl,
       async close(observe) {
+        daemon.daemonExitObserver?.beginShutdown();
         shutdownObserver = observe;
         const closeErrors: unknown[] = [];
         await supervisor.close().catch((error: unknown) => {
@@ -1074,6 +1123,7 @@ export async function startPackagedSidecars(
       },
     };
   } catch (error) {
+    for (const child of children) child.daemonExitObserver?.beginShutdown();
     await webSupervisor?.close().catch(() => undefined);
     for (const child of [...children].reverse()) {
       await closeManagedChild(child).catch(() => undefined);

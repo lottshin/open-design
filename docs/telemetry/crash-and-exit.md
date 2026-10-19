@@ -19,7 +19,7 @@ retain their meanings; `exit_reason` is additive where necessary. A new
 | --- | --- |
 | `crash` | Electron `crashed`/`abnormal-exit`, Node fatal report, or observed nonzero exit; not inferred from memory pressure |
 | `oom` | Electron explicitly says OOM, or prior-session fatal report / bounded prior log contains OOM evidence |
-| `killed` | An observer actually receives a killed reason or SIGKILL/SIGTERM during packaged startup; separate from crashes |
+| `killed` | A parent actually observes a termination signal (including SIGKILL/SIGTERM) during startup or after daemon ready; separate from OOM |
 | `clean-exit` | Electron clean exit, observed zero daemon exit, completed graceful shutdown, or recorded OS shutdown/logoff/session end |
 | `recovery-attempt` | Existing cooldown retry signal; excluded from crash counts |
 | `unknown` | Missing completion marker without stronger evidence; includes silent force-kill/power loss, never automatically OOM |
@@ -29,8 +29,9 @@ successful teardown. Suspend alone is not proof of termination. Graceful daemon
 shutdown (including updater sidecar retirement) still writes the clean marker;
 a zero daemon exit that bypasses cleanup now produces a clean health summary instead
 of `daemon_unclean_exit`. There is no attempt to infer a shutdown/update from a
-missing marker. A SIGKILL cannot run an exit listener, so daemon restart reports
-unknown even when a test harness knows it killed the child.
+missing marker. A SIGKILL cannot run a daemon exit listener. Packaged main now observes its
+child after ready; without that parent evidence (for example, both processes
+die), daemon restart still reports unknown.
 
 The renderer breaker still parks after five deaths within 60 seconds. The
 opening event carries `recovery_suppressed=true`; later repeated death reports
@@ -79,6 +80,67 @@ it does not prove how much of the historical production volume it explains.
 Queues remain bounded to 20 desktop sessions and five daemon reports. Erased,
 unwritable, or corrupt markers can lose evidence; there is no reconstructed rate.
 
+## 本地服务内存终止的判定与证据链
+
+| 分类 | 依据与限制 |
+| --- | --- |
+| `oom` | Node fatal report 的 `OOMError` / heap-out-of-memory 或同实例日志中的明确 V8 OOM 证据；RSS 高、堆比例高或 SIGKILL 本身均不足以判定 OOM |
+| `killed` | 打包父进程在 daemon ready 后收到子进程退出信号，记录 `signal`、可空 `exit_code` 和父进程观测时刻；仅表示被信号终止，无法区分内存、用户结束或系统行为 |
+| `unknown` | 前次运行未完成，且无父进程信号/退出码、fatal report 或明确 OOM 日志等更强证据；包括父进程也被结束、掉电、观测文件损坏或缺失 |
+
+运行期上报使用安全通道的 `client_process_exit`，`process_role=daemon`，
+`source_event=daemon_unclean_exit`。`occurred_at` 是父进程收到退出通知的时刻，
+`occurrence_time_source=observed`，首次报告 `is_backfill=false`。非零退出码为
+`crash`，零退出为 `clean-exit`；由本应用 Quit、更新替换或启动失败清理主动
+请求的 daemon 停止（包括超时强制结束）归 `clean-exit`，不计入 killed。
+没有收到退出通知时，单凭关闭意图不能证明进程已经退出。
+
+父进程在 spawn 前创建随机 UUID，通过 `OD_DAEMON_PROCESS_INSTANCE_ID` 交给
+该 daemon；它是观测关联字段，不改变 sidecar 的五字段身份协议。
+该 UUID 同时作为 daemon boot ID、内存采样和退出事件的
+`process_instance_id`。`app_session_id` / `launch_attempt_id` 沿用原启动上下文；
+无真实启动上下文时保留 null，不借用下一次启动的 ID。
+进程实例 ID 不包含 PID。内存采样追加可空 `heap_limit_bytes`（V8 的 JS 堆上限，
+非 RSS 或操作系统内存额度）；不可获取、非有限值或非正上限用 null。
+历史样本缺少此字段仍合法。原 `rss_bytes`、`heap_used_bytes` 保持不变。
+真实 server session 入口在存在有效打包实例 ID 时自动绑定此采样上下文，
+复用既有 60 秒 health 采样与安全 sink；不读取匿名指标开关。非打包启动仍可
+通过显式采样 context 启用。
+
+父进程只在收到死亡通知后，将受控观测写入由 daemon 数据根派生的 diagnostics
+目录，随后尝试有时限的直接安全上报。成功 HTTP 回应会标记已送达；下次启动
+按原进程实例匹配，跳过已送达报告，或将未送达的观测转入现有有界重放队列，
+优先使用父进程证据而不降级为 unknown。重放的载体 insert ID 为
+`<process_instance_id>-unclean-exit`，归一化事件始终使用该 ID 加 `:exit`，
+与父进程首次报告一致。中断确认、同时启动或本地写失败仍可能重发/丢失；
+网络交付并非 exactly-once，查询必须按 `(device_id, event_id)` / `$insert_id`
+去重。同一死亡的载体与归一化事件不能相加。明确 fatal/log OOM 证据优先于
+信号分类；父进程也检查同实例的这些证据，避免提前把 V8 OOM 固定为 killed。
+若重放才发现更强 OOM 证据，仍复用原死亡 ID；补充证据是否被远端保留取决于
+摄取端去重，不能据此保证分类已在远端更新。
+
+推荐查询口径（仅取 `client_process_exit`，不与兼容载体混算）：
+
+1. 按 `(device_id, event_id)` 去重，保留原死亡版本/会话/时间。若原始数据中
+   同 ID 仍有多个版本，优先明确 OOM 证据，再取 observed，最后取 checkpoint；
+   不把所有 replay 行都计作新死亡。
+2. 对每个 `process_role=daemon` 且 reason 为 killed 或 unknown 的退出，以
+   `(device_id, app_session_id, process_instance_id)` 关联
+   `client_process_memory_sample`，限定同实例且 `sampled_at <= occurred_at`，
+   取 `sampled_at` 最大的一条。禁止跨实例借用下一次启动或另一 daemon 的样本。
+3. 输出 RSS（`rss_bytes`）、JS 堆使用（`heap_used_bytes`）、堆上限
+   （`heap_limit_bytes`）、堆使用/堆上限比例，以及
+   `occurred_at - sampled_at` 的时间间隔。上限缺失/为零、旧数据无实例 ID、
+   无样本时返回 null 并单列缺失率，不补零、不推算系统内存不足。
+4. 对 unknown 的 `last_checkpoint`，间隔只是最后存活观测与采样的差，
+   不是精确死亡前时间。60 秒采样可能遗漏瞬时峰值，阻塞、短会话或离线也可能
+   没有可用样本；RSS/堆比例只能作为证据，不能解释信号的来源。
+5. **观测到的 OOM 为 0 时，须同时报告 unknown 占比**：同一时间、版本、平台
+   及安全采集域内，去重后的 unknown daemon 退出数 / 全部 daemon 退出数
+   （含 clean-exit），同时给出分子分母。另报 killed 占比、实例关联/采样覆盖率。
+   旧版本缺少正常退出观测时应单列，不能把新旧采集覆盖差异当作改善，
+   也不能用 OOM=0 宣称“系统因内存终止归零”。
+
 ## Denominators and safety delivery
 
 Compute crash-session rate as distinct `(device_id, app_session_id)` with
@@ -123,7 +185,9 @@ Exit processing adds one schema projection per accepted carrier, no polling.
 Desktop HTTP remains bounded by five seconds. Packaged
 legacy and normalized exit sends run together under their existing five-second
 network cap, without adding a second sequential network wait. No startup success
-path awaits telemetry delivery. Filesystem scheduling is outside network caps.
+path awaits telemetry delivery. Runtime daemon exit capture starts at the child
+exit notification; managed shutdown flushes that same send with at most the
+existing five-second network budget, with no polling or retry loop. Filesystem scheduling is outside network caps.
 
 ## Validation and remaining QA
 
@@ -146,7 +210,9 @@ QA must run signed macOS and Windows candidates with isolated runtime data:
    five quiet minutes a recovery-attempt is excluded from the crash numerator.
 3. Exit via Quit and updater restart; then log off/shut down the OS. Relaunch and
    verify expected shutdowns do not appear as crash/OOM. Force-kill main and
-   daemon separately, relaunch, and verify unknown without evidence, original
+   daemon separately. Runtime daemon kills with a surviving parent must report
+   killed once; without surviving parent evidence verify unknown. Relaunch and
+   check original
    version/session/attempt, and stable replay ID when delivery was interrupted.
 4. Upgrade between the killed session and restart. Confirm attribution remains
    on the killed version and legacy missing IDs remain null. Repeat with network
@@ -158,6 +224,19 @@ QA must run signed macOS and Windows candidates with isolated runtime data:
    Repeat crash/restart and memory cases; verify safety events still report and
    normalized payloads contain no paths, URLs, content, prompts or raw PIDs.
    Confirm a product analytics event remains blocked.
+
+7. macOS: launch a signed candidate, wait for ready and at least one daemon
+   memory sample, then use Activity Monitor to Force Quit the daemon/local
+   service child while leaving Open Design main alive. Verify one killed exit
+   with signal, observed time and matching process/session/attempt IDs. Relaunch
+   and confirm no second death; join the last memory sample including heap limit.
+8. Windows: repeat with Task Manager → Details → End task on the local service
+   process, leaving the app parent alive. Verify the native code/signal actually
+   supplied by Node: a supplied signal means killed; a nonzero code without a
+   signal means crash. Windows does not guarantee POSIX signal attribution.
+   On both platforms repeat normal Quit and update replacement, including forced
+   cleanup, and verify clean-exit rather than killed. Repeat offline then restart
+   to verify original-ID replay and opt-out safety delivery.
 
 Native main crashes, OS-specific shutdown/update behavior, real ingestion,
 signed-platform QA, release, and seven-day before/after observation remain open.

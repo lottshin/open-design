@@ -34,6 +34,8 @@ import {
 } from 'node:perf_hooks';
 import v8 from 'node:v8';
 
+import { daemonExitObservationSchema } from '@open-design/contracts/analytics';
+
 import type { SqlitePageStats } from '../storage/db-inspect.js';
 
 const SCHEMA_VERSION = 1;
@@ -156,7 +158,7 @@ type Clock = () => number;
 
 /** Optional daemon curve context; the shared analytics layer owns event admission. */
 export type DaemonMemorySampleContext = {
-  app_session_id: string;
+  app_session_id: string | null;
   app_version: string | null;
   environment: string | null;
   platform: string;
@@ -173,6 +175,7 @@ export type DaemonProcessMemorySample = DaemonMemorySampleContext & {
   uptime_ms: number;
   rss_bytes: number | null;
   heap_used_bytes: number | null;
+  heap_limit_bytes: number | null;
   external_bytes: number | null;
   sampled_at: string;
   sampling_interval_ms: number;
@@ -210,12 +213,13 @@ export function createDaemonHealth(options: DaemonHealthOptions) {
   const first = safe(() => readHeap(), null);
   const checkpoint: Checkpoint = {
     schemaVersion: SCHEMA_VERSION,
-    bootId: randomUUID(),
+    bootId: daemonExitObservationSchema.shape.process_instance_id.safeParse(process.env.OD_DAEMON_PROCESS_INSTANCE_ID).success
+      ? process.env.OD_DAEMON_PROCESS_INSTANCE_ID! : randomUUID(),
     pid,
     startedAt: now(),
     updatedAt: now(),
     appVersion: process.env.OD_APP_VERSION ?? null,
-    appSessionId: process.env.OD_APP_SESSION_ID ?? null,
+    appSessionId: process.env.OD_APP_SESSION_ID ?? memoryContext?.app_session_id ?? null,
     launchAttemptId: process.env.OD_LAUNCH_ATTEMPT_ID ?? null,
     runtime: {
       node: process.versions.node,
@@ -273,6 +277,9 @@ export function createDaemonHealth(options: DaemonHealthOptions) {
     }
   }, undefined);
   const previous = rotated ? safe(() => readCheckpoint(paths.previous), null) : null;
+  const observationPath = join(paths.directory, 'daemon-exit-observation.json');
+  const observed = safe(() => daemonExitObservationSchema.parse(JSON.parse(readFileSync(observationPath, 'utf8'))), null);
+  const parentExit = observed?.process_instance_id === previous?.bootId ? observed : null;
   const previousReport = safe(() => previousSessionReport(previous), null);
   checkpoint.pendingReports = [...new Map([
     ...(previous?.pendingReports ?? []),
@@ -282,6 +289,11 @@ export function createDaemonHealth(options: DaemonHealthOptions) {
   // ever read here, reduced to controlled fields, and deleted.
   safe(() => rmSync(paths.fatalReports, { recursive: true, force: true }), undefined);
   persist();
+  // Once adopted, the checkpoint's bounded pending queue owns retries. Retain
+  // the file if persistence failed, so a restart can still recover the evidence.
+  if (parentExit && safe(() => readCheckpoint(paths.current)?.bootId === checkpoint.bootId, false)) {
+    safe(() => rmSync(observationPath, { force: true }), undefined);
+  }
 
   if (options.instrumentProcess !== false) instrument();
 
@@ -372,8 +384,9 @@ export function createDaemonHealth(options: DaemonHealthOptions) {
       uptime_ms: Math.max(0, now() - checkpoint.startedAt),
       rss_bytes: memoryBytes(value.rss),
       heap_used_bytes: memoryBytes(value.heapUsed),
+      heap_limit_bytes: value.heapLimit > 0 ? memoryBytes(value.heapLimit) : null,
       external_bytes: memoryBytes(value.external),
-      sampled_at: new Date(now()).toISOString(),
+      sampled_at: new Date(value.at).toISOString(),
       sampling_interval_ms: sampleIntervalMs,
     };
     const target = sink;
@@ -487,10 +500,11 @@ export function createDaemonHealth(options: DaemonHealthOptions) {
   // ---- previous session ----
   function previousSessionReport(prior: Checkpoint | null): PendingReport | null {
     if (!prior || prior.schemaVersion !== SCHEMA_VERSION || typeof prior.bootId !== 'string') return null;
-    if (prior.pid !== pid && prior.state === 'running' && isAlive(prior.pid)) return null; // another live daemon
-    const unclean = prior.state !== 'clean_shutdown' && prior.exitCode !== 0;
+    if (!parentExit && prior.pid !== pid && prior.state === 'running' && isAlive(prior.pid)) return null; // another live daemon
+    const unclean = parentExit ? parentExit.reason !== 'clean-exit' : prior.state !== 'clean_shutdown' && prior.exitCode !== 0;
     const properties: Record<string, unknown> = {
       previous_boot_id: prior.bootId,
+      process_instance_id: prior.bootId,
       previous_app_version: prior.appVersion ?? null,
       app_version: prior.appVersion ?? null,
       app_session_id: prior.appSessionId ?? null,
@@ -504,6 +518,13 @@ export function createDaemonHealth(options: DaemonHealthOptions) {
       uptime_ms: Math.max(0, prior.updatedAt - prior.startedAt),
       ...summaryProperties(prior),
     };
+    if (parentExit) Object.assign(properties, {
+      app_version: parentExit.app_version, previous_app_version: parentExit.app_version,
+      app_session_id: parentExit.app_session_id, launch_attempt_id: parentExit.launch_attempt_id,
+      occurred_at: parentExit.occurred_at, occurrence_time_source: 'observed',
+      exit_code: parentExit.exit_code, signal: parentExit.signal,
+    });
+    if (parentExit?.delivered && !unclean) return null;
     if (!unclean) {
       return { eventName: 'daemon_health_summary', properties, insertId: `${prior.bootId}-health-summary` };
     }
@@ -524,6 +545,14 @@ export function createDaemonHealth(options: DaemonHealthOptions) {
       death_large_object_mb: fatal?.largeObject == null ? undefined : mib(fatal.largeObject),
       death_max_rss_mb: fatal?.maxRss == null ? undefined : mib(fatal.maxRss),
     });
+    if (parentExit) {
+      if (parentExit.delivered && (!oom || parentExit.reason === 'oom')) return null;
+      Object.assign(properties, {
+        reason: oom ? 'oom' : parentExit.reason,
+        exit_class: oom ? 'oom' : parentExit.reason,
+        exit_evidence: oom ? properties.exit_evidence : 'parent_observation',
+      });
+    }
     return { eventName: 'daemon_unclean_exit', properties, insertId: `${prior.bootId}-unclean-exit` };
   }
 
@@ -711,7 +740,21 @@ let activeHealth: DaemonHealth | null = null;
 /** One health session per daemon process; later calls return the first. */
 export function beginDaemonHealthSession(options: DaemonHealthOptions): DaemonHealth | null {
   if (activeHealth) return activeHealth;
-  activeHealth = safe(() => createDaemonHealth(options), null);
+  // The server calls this entry without an explicit sample context. Packaged
+  // launches already provide the parent's opaque instance and launch IDs; use
+  // those here so the real runtime (not just opt-in test producers) emits the
+  // same process curve. Standalone sessions keep the existing opt-in behavior.
+  const packagedInstance = daemonExitObservationSchema.shape.process_instance_id.safeParse(process.env.OD_DAEMON_PROCESS_INSTANCE_ID);
+  const session = daemonExitObservationSchema.shape.app_session_id.safeParse(process.env.OD_APP_SESSION_ID ?? null);
+  const memorySampling = options.memorySampling ?? (packagedInstance.success ? {
+    app_session_id: session.success ? session.data : null,
+    app_version: process.env.OD_APP_VERSION ?? null,
+    environment: null,
+    platform: process.platform,
+    arch: process.arch,
+    os_version: null,
+  } : undefined);
+  activeHealth = safe(() => createDaemonHealth({ ...options, ...(memorySampling ? { memorySampling } : {}) }), null);
   return activeHealth;
 }
 

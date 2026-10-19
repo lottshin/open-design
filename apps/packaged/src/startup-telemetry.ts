@@ -25,9 +25,9 @@
 // errors are module-resolution / daemon-exit messages, not user content, so this
 // bounds the exposure to build/OS strings rather than anything the user typed.
 
-import { buildClientTelemetryParams, isClientMetricEventName, parseClientMetricEvent, processExitMetricFields, classifyProcessExit } from "@open-design/contracts/analytics";
+import { daemonExitObservationSchema, type DaemonExitObservation, buildClientTelemetryParams, isClientMetricEventName, parseClientMetricEvent, processExitMetricFields, classifyProcessExit } from "@open-design/contracts/analytics";
 import { readFile } from "node:fs/promises";
-import { readFileSync, statSync } from "node:fs";
+import { closeSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { release } from "node:os";
 
@@ -360,6 +360,8 @@ export interface CaptureDeps {
   timeoutMs?: number;
   now?: () => string;
   insertId?: string;
+  /** Called only for a successful response received within the transport budget. */
+  onCaptured?: () => void;
 }
 
 // Fire a single PostHog capture over plain HTTPS. No-op without a key; never
@@ -412,13 +414,15 @@ export async function captureStartupFailure(
     timestamp: args.occurredAt ?? now(),
   });
 
+  let acceptingResponse = true;
   const send = (async () => {
     try {
-      await fetchImpl(`${host}/capture/`, {
+      const response = await fetchImpl(`${host}/capture/`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body,
       });
+      if (response.ok && acceptingResponse) deps.onCaptured?.();
     } catch {
       // analytics failure must never look like a product error
     }
@@ -429,6 +433,7 @@ export async function captureStartupFailure(
     timer = setTimeout(resolve, timeoutMs);
   });
   await Promise.race([send, timeout]);
+  acceptingResponse = false;
   if (timer) clearTimeout(timer);
 }
 
@@ -615,4 +620,87 @@ export async function reportStartupFailure(
   } catch {
     // Reporting a startup failure must NEVER itself break the exit path.
   }
+}
+
+
+/** Same explicit fatal/log evidence as daemon replay; signal or RSS alone is insufficient. */
+function observedDaemonOom(dataRoot: string, instanceId: string, logPath?: string): boolean {
+  try {
+    const checkpoint = JSON.parse(readFileSync(join(dataRoot, 'diagnostics', 'daemon-health.json'), 'utf8')) as {
+      bootId?: string; pid?: number; startedAt?: number;
+    };
+    if (checkpoint.bootId !== instanceId || typeof checkpoint.startedAt !== 'number') return false;
+    const reports = join(dataRoot, 'diagnostics', 'fatal-reports');
+    let names: string[] = [];
+    try { names = readdirSync(reports).filter(name => name.endsWith('.json')).sort().slice(-5); } catch {}
+    for (const name of names.reverse()) {
+      try {
+        const file = join(reports, name);
+        const stat = statSync(file);
+        if (stat.size > 8 * 1024 * 1024 || stat.mtimeMs < checkpoint.startedAt - 1000) continue;
+        const report = JSON.parse(readFileSync(file, 'utf8')) as { header?: { processId?: number; trigger?: string; event?: string } };
+        if (report.header?.processId === checkpoint.pid && (report.header?.trigger === 'OOMError'
+          || /heap out of memory/i.test(report.header?.event ?? ''))) return true;
+      } catch {}
+    }
+    if (logPath) {
+      const stat = statSync(logPath);
+      if (stat.mtimeMs < checkpoint.startedAt - 1000) return false;
+      const length = Math.min(stat.size, 64 * 1024);
+      const buffer = Buffer.alloc(length);
+      const fd = openSync(logPath, 'r');
+      try { readSync(fd, buffer, 0, length, stat.size - length); } finally { closeSync(fd); }
+      return buffer.toString('utf8').includes('JavaScript heap out of memory');
+    }
+  } catch {}
+  return false;
+}
+
+/** Runtime safety capture survives a dead daemon; persist before attempting delivery. */
+export async function reportDaemonExit(args: {
+  dataRoot: string;
+  installationRoot: string;
+  namespace: string;
+  posthogKey: string | null;
+  posthogHost: string | null;
+  observation: DaemonExitObservation;
+  logPath?: string;
+}, deps: CaptureDeps = {}): Promise<void> {
+  try {
+    const observation = daemonExitObservationSchema.parse(args.observation);
+    if (observation.reason !== 'clean-exit' && observedDaemonOom(args.dataRoot, observation.process_instance_id, args.logPath)) {
+      observation.reason = 'oom';
+    }
+    const directory = join(args.dataRoot, 'diagnostics');
+    const path = join(directory, 'daemon-exit-observation.json');
+    const persist = (value: DaemonExitObservation): void => {
+      mkdirSync(directory, { recursive: true });
+      writeFileSync(`${path}.tmp`, JSON.stringify(value), { mode: 0o600 });
+      renameSync(`${path}.tmp`, path);
+    };
+    // Disk failure must not prevent the direct safety capture.
+    try { persist(observation); } catch {}
+    const distinctId = resolveStartupDistinctId(args.namespace, args.installationRoot);
+    const eventId = `${observation.process_instance_id}-unclean-exit:exit`;
+    const common = buildClientTelemetryParams(observation, {
+      eventId, deviceId: distinctId.startsWith('packaged-') ? null : distinctId,
+      appVersion: observation.app_version, clientType: 'desktop', captureSource: 'packaged/runtime',
+      env: resolveTelemetryEnv(), platform: process.platform, arch: process.arch,
+      reportedAt: (deps.now ?? (() => new Date().toISOString()))(), preserveUnknownAppVersion: true,
+    });
+    const metric = parseClientMetricEvent('client_process_exit', { ...common,
+      ...processExitMetricFields('daemon_unclean_exit', { ...observation, previous_app_version: observation.app_version,
+        occurrence_time_source: 'observed', is_backfill: false }),
+    });
+    if (!metric) return;
+    await captureStartupFailure({ ...args, distinctId, event: 'client_process_exit', properties: metric,
+      occurredAt: observation.occurred_at }, { ...deps, insertId: eventId, onCaptured: () => {
+        try {
+          const current = daemonExitObservationSchema.parse(JSON.parse(readFileSync(path, 'utf8')));
+          // A restart may already have consumed the observation. Never resurrect it
+          // or overwrite the next generation's evidence after an asynchronous send.
+          if (current.process_instance_id === observation.process_instance_id) persist({ ...current, delivered: true });
+        } catch {}
+      } });
+  } catch { /* Observability must never change process supervision. */ }
 }
