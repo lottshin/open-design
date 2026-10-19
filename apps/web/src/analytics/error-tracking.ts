@@ -13,6 +13,9 @@ import { reportExperienceEvent } from '../observability/experience-diagnostics';
 //      user opts out of general analytics. The user-facing copy in
 //      Settings → Privacy must reflect this.
 //
+//      Preview/navigation metrics, application-white-screen and chat-firstpaint
+//      are the explicit consent-gated subset defined below (OPEND-3718).
+//
 //   2. **Lazy-load window.** posthog-js is dynamically `import()`-ed only
 //      after `/api/analytics/config` returns AND the user has consented.
 //      Errors / metrics that fire during the first 1-2 seconds (React
@@ -94,6 +97,8 @@ export function detectBrowserOsName(): BrowserOsName {
 
 interface ExceptionTrackingContext {
   apiKey: string;
+  /** Fail-closed decision from the daemon analytics config endpoint. */
+  metricsEnabled?: boolean;
   host: string;
   distinctId: string;
   clientType: AnalyticsClientType;
@@ -132,6 +137,7 @@ let installed = false;
 
 export function setExceptionTrackingContext(next: ExceptionTrackingContext): void {
   context = { ...next, appSessionId: next.appSessionId ?? context?.appSessionId };
+  if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('od:client-metrics-available', { detail: { enabled: clientMetricsConsent && context?.metricsEnabled === true } }));
   if (buffer.length === 0) return;
   const drain = buffer.splice(0, buffer.length);
   for (const item of drain) {
@@ -145,6 +151,7 @@ export function clearExceptionTrackingContext(): void {
   // until the page unloads — no key, nowhere to send them, but also
   // nothing leaks.
   context = null;
+  if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('od:client-metrics-available', { detail: { enabled: false } }));
 }
 
 // Patches only the appVersion field on an existing context. Safe to call
@@ -271,12 +278,28 @@ function captureException(
 // guarantees apply. Callers should namespace event names with `client_*`
 // (or `desktop_*` / `daemon_*` for cross-process forwards) so they're
 // easy to filter against posthog-js-captured product events.
+// Metrics opt-in is independent of the historical safety-telemetry policy.
+// Never buffer metrics while consent or bootstrap context is unavailable.
+let clientMetricsConsent = false;
+export function setClientMetricsConsent(granted: boolean): void {
+  clientMetricsConsent = granted === true;
+  if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('od:client-metrics-available', { detail: { enabled: clientMetricsConsent && context?.metricsEnabled === true } }));
+}
+export function reportClientMetricEvent(event: string, properties: Record<string, unknown>): boolean {
+  if (!clientMetricsConsent || context?.metricsEnabled !== true || !isClientMetricEventName(event)) return false;
+  enqueue(event, { ...properties, $insert_id: typeof properties.event_id === 'string' ? properties.event_id : randomId() });
+  return true;
+}
+
 export function reportSafetyEvent(
   eventName: string,
   properties: Record<string, unknown> = {},
   options: { currentUrlOverride?: string; shouldSend?: () => boolean } = {},
 ): void {
   if (options.shouldSend && !options.shouldSend()) return;
+  if (isClientMetricEventName(eventName)) { reportClientMetricEvent(eventName, properties); return; }
+  if ((eventName.startsWith('client_preview_') || ['client_white_screen', 'client_chat_first_paint'].includes(eventName))
+    && (!clientMetricsConsent || context?.metricsEnabled !== true)) return;
   reportExperienceEvent(eventName, properties);
   const merged: Record<string, unknown> = {
     ...properties,
@@ -308,6 +331,8 @@ function enqueue(eventName: string, properties: Record<string, unknown>, shouldS
 
 function dispatch(item: BufferedSafetyEvent): void {
   if (context == null || (item.shouldSend && !item.shouldSend())) return;
+  if (context == null || (isClientMetricEventName(item.eventName) && (!clientMetricsConsent || context.metricsEnabled !== true))) return;
+  if ((item.eventName.startsWith('client_preview_') || ['client_white_screen', 'client_chat_first_paint'].includes(item.eventName)) && (!clientMetricsConsent || context?.metricsEnabled !== true)) return;
   const original = item.body.properties;
   const common = buildClientTelemetryParams(original, {
     eventId: String(original.$insert_id), deviceId: context.distinctId,

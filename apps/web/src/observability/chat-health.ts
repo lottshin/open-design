@@ -214,6 +214,7 @@ class ChatSurface implements ChatSurfaceHandle {
   private readonly element: HTMLElement;
   private readonly openKind: ChatOpenKind;
   private readonly openedAt: number;
+  private readonly timingOrigin: 'navigation_intent' | 'surface_attach_fallback';
   private readonly attachedAt: number;
 
   private messageCount: number;
@@ -261,6 +262,7 @@ class ChatSurface implements ChatSurfaceHandle {
     const intent = consumeOpenIntent(this.attachedAt);
     this.openKind = intent?.kind ?? input.fallbackOpenKind ?? 'remount';
     this.openedAt = intent?.at ?? this.attachedAt;
+    this.timingOrigin = intent ? 'navigation_intent' : 'surface_attach_fallback';
 
     this.sampleTimer = setInterval(() => {
       // A hidden tab is throttled: its timers fire late, its heap is not
@@ -297,10 +299,15 @@ class ChatSurface implements ChatSurfaceHandle {
     this.paintReported = true;
     if (!responsivenessConsent()) return;
     pushChatBreadcrumb('first_paint');
+    const trust = chatMeasurementTrust({ hiddenDuringWindow: this.hiddenSincePaintWindow });
     const props: ChatFirstPaintProps = {
       ...chatCorrelation(),
-      ...chatMeasurementTrust({ hiddenDuringWindow: this.hiddenSincePaintWindow }),
+      ...trust,
+      ...(this.timingOrigin === 'surface_attach_fallback' ? { measurement_trusted: false,
+        untrusted_reason: trust.untrusted_reason ?? 'missing_open_intent' as const } : {}),
       open_kind: this.openKind,
+      timing_origin: this.timingOrigin,
+      metric_schema_version: 1,
       duration_ms: Math.round(now() - this.openedAt),
       message_count: this.messageCount,
       rendered_row_count: input.renderedRowCount,

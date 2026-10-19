@@ -77,7 +77,22 @@ const navigationSchema = metricCommonSchema.extend({
   started_at: time,
   duration_ms: measurement.nullable(),
   reason_code: token.optional(),
+  source_page: token.optional(),
+  target_page: token.optional(),
 }).refine((value) => value.result !== 'ready' || value.duration_ms !== null);
+
+// Additive v1 event family: no change to the historical safety-event schema.
+const previewAttemptSchema = metricCommonSchema.extend({
+  preview_attempt_id: token,
+  render_mode: z.enum(['srcdoc', 'url_load', 'live_artifact']),
+  artifact_kind: token.nullable(),
+  started_at: time,
+});
+const previewResultSchema = previewAttemptSchema.extend({
+  result: z.enum(['success', 'white_screen', 'error', 'cancelled']),
+  duration_ms: measurement.nullable(),
+  monitoring_kind: z.enum(['visible_content', 'no_visible_paint_after_timeout', 'srcdoc_transport_unverified', 'preview_error', 'left_or_hidden', 'probe_unverified']),
+});
 const memorySchema = metricCommonSchema.extend({
   process_role: z.enum(['main', 'renderer', 'gpu', 'utility', 'daemon']),
   // Opaque per-process identifier, never a raw PID or filesystem path.
@@ -146,6 +161,8 @@ export const CLIENT_METRIC_SCHEMAS = {
   client_launch_result: launchResultSchema,
   client_navigation_result: navigationSchema,
   client_process_memory_sample: memorySchema,
+  client_preview_attempt: previewAttemptSchema,
+  client_preview_result: previewResultSchema,
 } as const;
 export type ClientMetricEventName = keyof typeof CLIENT_METRIC_SCHEMAS;
 export type ClientMetricProps<E extends ClientMetricEventName> = z.infer<typeof CLIENT_METRIC_SCHEMAS[E]>;

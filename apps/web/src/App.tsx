@@ -164,7 +164,7 @@ import {
   stashHomePromptHandoff,
 } from './components/home-hero/plugin-authoring';
 import { goBack, navigate, useRoute, type Route } from './router';
-import { navigationTiming } from './observability/navigation-timing';
+import { navigationTiming, navigationPage, usePageNavigationReady } from './observability/navigation-timing';
 import { useStartupReady } from './observability/startup-ready';
 import {
   fetchDaemonConfig,
@@ -1483,6 +1483,23 @@ function AppInner() {
       && workspaceSkills.identity === currentWorkspaceCatalogIdentity
       && workspaceDesignSystems.identity === currentWorkspaceCatalogIdentity,
   });
+  // Page timing shares the authoritative Home gates, including scoped data.
+  // Independent data-driven destinations report Ready in their own component.
+  const pageWithSharedData = route.kind === 'home' && ['home', 'onboarding', 'projects', 'drafts', 'all-projects', 'design-systems', 'brands', 'settings'].includes(route.view);
+  usePageNavigationReady({
+    page: navigationPage(route),
+    visible: pageWithSharedData && daemonAppConfigReady,
+    ready: pageWithSharedData && daemonAppConfigReady && !workspaceContextLoading
+      && !workspaceContextState.identityChangePending && !projectsLoading
+      && appliedProjectListWitness?.displayKey === currentProjectDisplayKey
+      && projectListFailure?.displayKey !== currentProjectDisplayKey
+      && agentsReady && !agentsLoading && !skillsLoading && !dsLoading && !promptTemplatesLoading
+      && workspaceSkills.identity === currentWorkspaceCatalogIdentity
+      && workspaceDesignSystems.identity === currentWorkspaceCatalogIdentity
+      && (route.kind !== 'home' || route.view !== 'settings' || !composioConfigLoading),
+    failure: pageWithSharedData && projectListFailure?.displayKey === currentProjectDisplayKey,
+    scopeKey: currentProjectDisplayKey,
+  });
   // Display snapshots are deliberately separate from authorization. They may
   // prevent a warm view from flashing a loader, but every network read and
   // mutation still carries the current request's independently verified
@@ -1767,8 +1784,8 @@ function AppInner() {
   // every subsequent capture() a no-op. When the user opts back in we
   // call opt_in_capturing to resume.
   useEffect(() => {
-    analytics.setConsent(config.telemetry?.metrics === true);
-  }, [analytics.setConsent, config.telemetry?.metrics]);
+    analytics.setConsent(daemonAppConfigReady && config.telemetry?.metrics === true);
+  }, [analytics.setConsent, daemonAppConfigReady, config.telemetry?.metrics]);
 
   // Sync PostHog's distinct_id with the anonymous installationId, both on
   // first opt-in (when the daemon stamps a fresh id) and on Delete-my-data
