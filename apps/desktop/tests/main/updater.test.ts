@@ -3935,14 +3935,18 @@ describe("desktop updater", () => {
 
 });
 
-it('journals failed checks with an independent denominator and fresh flow on retry', async () => {
+it.each(['failed', 'cancelled'] as const)('journals %s checks with an independent denominator and fresh flow on retry', async result => {
   const root = makeRoot();
   const observationRoot = join(root, 'observations', 'installer');
   const updater = createDesktopUpdater({
     arch: 'arm64', downloadRoot: join(root, 'updates'),
     env: { ...updaterEnv('https://fixture.invalid/metadata.json'), [DESKTOP_UPDATE_ENV.OPEN_DRY_RUN]: '0' },
     installerObservationRoot: observationRoot, namespace: 'release', source: SIDECAR_SOURCES.TOOLS_PACK,
-  }, { metricsConsent: async () => true, fetch: vi.fn(async () => { throw new Error('/private/network-secret'); }), logger: { warn: vi.fn(), error: vi.fn(), info: vi.fn() } });
+  }, { metricsConsent: async () => true, fetch: vi.fn(async () => {
+    const error = new Error('/private/network-secret');
+    if (result === 'cancelled') error.name = 'AbortError';
+    throw error;
+  }), logger: { warn: vi.fn(), error: vi.fn(), info: vi.fn() } });
   try {
     await updater.checkForUpdates();
     await updater.checkForUpdates();
@@ -3950,14 +3954,14 @@ it('journals failed checks with an independent denominator and fresh flow on ret
     for (const flowId of await readdir(observationRoot)) {
       const events = await Promise.all(['started', 'result'].map(async phase => JSON.parse(await readFile(join(observationRoot, flowId, 'stages', `check-${phase}.json`), 'utf8'))));
       expect(events[0]).toMatchObject({ flow_id: flowId, stage: 'check', result: 'started', to_version: null });
-      expect(events[1]).toMatchObject({ flow_id: flowId, stage: 'check', result: 'failed', reason_code: 'check_failed' });
+      expect(events[1]).toMatchObject({ flow_id: flowId, stage: 'check', result, reason_code: result === 'failed' ? 'check_failed' : 'cancelled' });
       expect(JSON.stringify(events)).not.toContain('/private');
     }
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 it.each(['manual', 'silent'] as const)('correlates %s installer stages and isolates check, download, checksum and open failures', async trigger => {
-  for (const fault of ['none', 'network', 'checksum', 'open'] as const) {
+  for (const fault of ['none', 'network', 'checksum', 'cancelled', 'open'] as const) {
     const root = makeRoot();
     const fixture = await createUpdaterFixture();
     const observationRoot = join(root, 'observations', 'installer');
@@ -3969,6 +3973,7 @@ it.each(['manual', 'silent'] as const)('correlates %s installer stages and isola
       metricsConsent: async () => true,
       fetch: async (url, init) => {
         if (fault === 'network' && String(url).endsWith('/artifact.dmg')) throw new Error('offline');
+        if (fault === 'cancelled' && String(url).endsWith('.sha256')) throw new DOMException('cancelled', 'AbortError');
         if (fault === 'checksum' && String(url).endsWith('.sha256')) return new Response('0'.repeat(64));
         return await fetch(url, init);
       },
@@ -3983,9 +3988,9 @@ it.each(['manual', 'silent'] as const)('correlates %s installer stages and isola
         const check = JSON.parse(await readFile(join(folder, 'check-result.json'), 'utf8'));
         expect(check).toMatchObject({ stage: 'check', result: 'success', trigger });
         const download = JSON.parse(await readFile(join(folder, 'download-result.json'), 'utf8'));
-        expect(download.result).toBe(fault === 'network' || fault === 'checksum' ? 'failed' : 'success');
+        expect(download.result).toBe(fault === 'cancelled' ? 'cancelled' : fault === 'network' || fault === 'checksum' ? 'failed' : 'success');
         const verify = JSON.parse(await readFile(join(folder, 'verify-result.json'), 'utf8'));
-        expect(verify.result).toBe(fault === 'checksum' ? 'failed' : fault === 'network' ? 'unknown' : 'success');
+        expect(verify.result).toBe(fault === 'cancelled' ? 'cancelled' : fault === 'checksum' ? 'failed' : fault === 'network' ? 'unknown' : 'success');
         if (fault === 'none' || fault === 'open') {
           const open = JSON.parse(await readFile(join(folder, 'install_open-result.json'), 'utf8'));
           const summary = JSON.parse(await readFile(join(observationRoot, flow!, 'summary.json'), 'utf8'));

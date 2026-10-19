@@ -81,7 +81,7 @@ it('projects only finite metrics and rejects mismatched flow, stage, identity an
   expect(serialized).toContain('"forced_process_count":3');
 });
 
-it('replays front-stage attempts without an install summary and deduplicates both phases', async () => {
+async function metricFixture() {
   const { flow, options, capture } = await fixture();
   await rm(join(flow, 'summary.json'));
   await mkdir(join(flow, 'stages'), { recursive: true });
@@ -93,6 +93,11 @@ it('replays front-stage attempts without an install summary and deduplicates bot
     app_session_id: 'app-1', app_version: '0.22.2-prerelease.2', platform: 'win32', arch: 'x64',
     private_path: '/private', pid: 123, metric_schema_version: 1,
   }));
+  return { flow, options, capture };
+}
+
+it('replays front-stage attempts without an install summary and deduplicates both phases', async () => {
+  const { options, capture } = await metricFixture();
   expect(await observeUpdateLifecycleStages(options)).toEqual({ queued: 2 });
   expect(await observeUpdateLifecycleStages(options)).toEqual({ queued: 0 });
   expect(capture).toHaveBeenCalledTimes(2);
@@ -102,4 +107,26 @@ it('replays front-stage attempts without an install summary and deduplicates bot
   } });
   expect(JSON.stringify(capture.mock.calls)).not.toContain('/private');
   expect(JSON.stringify(capture.mock.calls)).not.toContain('"pid"');
+});
+
+it('retries new stage enqueue failures using stable IDs and receipts only local acceptance', async () => {
+  const { flow, options, capture } = await metricFixture();
+  capture.mockRejectedValueOnce(new Error('offline'));
+  expect(await observeUpdateLifecycleStages(options)).toEqual({ queued: 1 });
+  await expect(readFile(join(flow, 'stages/check-started.json.receipt'))).rejects.toMatchObject({ code: 'ENOENT' });
+  expect(await observeUpdateLifecycleStages(options)).toEqual({ queued: 1 });
+  expect(capture.mock.calls[0]?.[0]?.insertId).toBe(capture.mock.calls[2]?.[0]?.insertId);
+  expect(JSON.parse(await readFile(join(flow, 'stages/check-started.json.receipt'), 'utf8')).status).toBe('queued');
+  expect(await observeUpdateLifecycleStages(options)).toEqual({ queued: 0 });
+});
+
+it.each(['disabled', 'unreadable'] as const)('does not replay %s-consent stage records after later opt-in', async consent => {
+  const { flow, options, capture } = await metricFixture();
+  expect(await observeUpdateLifecycleStages({ ...options, readConfig: async () => {
+    if (consent === 'unreadable') throw new Error('damaged config');
+    return { installationId: 'test-device', telemetry: { metrics: false } };
+  } })).toEqual({ queued: 0 });
+  expect(JSON.parse(await readFile(join(flow, 'stages/check-started.json.receipt'), 'utf8')).status).toBe('skipped_no_consent');
+  expect(await observeUpdateLifecycleStages(options)).toEqual({ queued: 0 });
+  expect(capture).not.toHaveBeenCalled();
 });

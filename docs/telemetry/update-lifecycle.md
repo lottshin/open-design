@@ -2,12 +2,11 @@
 
 ## Delivery status
 
-This candidate adds stage journals and next-launch attribution. It is **not
-release ready** until `client_update_stage_result` is registered in
-`CLIENT_METRIC_SCHEMAS` in `packages/contracts/src/analytics/client-metrics.ts`.
-That shared/core file was not authorized in this job's writable declaration;
-the requested additive registration remains pending. The contract admission and
-front-stage replay regressions deliberately expose this missing integration.
+This candidate adds stage journals and next-launch attribution.
+`client_update_stage_result` is registered additively in `CLIENT_METRIC_SCHEMAS`
+in `packages/contracts/src/analytics/client-metrics.ts`, so the common parser
+admits validated stage records and strips undeclared fields before submission.
+The contract admission and front-stage replay regressions cover this integration.
 No release, real installation, remote ingestion, QA acceptance or seven-day
 outcome is established by these local changes.
 
@@ -117,6 +116,13 @@ bounded total directory size or implement journal garbage collection. Native
 CPU/IO measurements and retention policy remain follow-up work.
 
 ## Local coverage and remaining acceptance
+
+Local regressions cover common-schema admission and privacy projection, failed
+enqueue retry with stable insert IDs, and skipped consent receipts that prevent
+later historical replay. Cancellation fixtures abort metadata fetching or
+checksum resolution; they do not claim a user-facing transfer-cancel control.
+The new contract admission regression fails on `aa88f4387` and on the previous
+candidate before registration, and passes with registration in place.
 
 | Path / trigger | Local evidence | Remaining |
 | --- | --- | --- |

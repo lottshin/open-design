@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { releaseChannelFromVersion } from '@open-design/release';
+import { updateStageMetricFields } from './update-lifecycle.js';
 
 /** Additive metric revision; historical event_schema_version 2/4 is never rewritten. */
 export const CLIENT_METRIC_SCHEMA_VERSION = 1;
@@ -86,6 +87,7 @@ const memorySchema = metricCommonSchema.extend({
 });
 
 export const CLIENT_METRIC_SCHEMAS = {
+  client_update_stage_result: metricCommonSchema.extend(updateStageMetricFields),
   client_launch_attempt: launchAttemptSchema,
   client_business_ready: businessReadySchema,
   client_launch_result: launchResultSchema,
