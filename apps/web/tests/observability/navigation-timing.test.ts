@@ -6,6 +6,7 @@ import {
   createNavigationTiming,
   navigationTiming,
   useProjectNavigationReady,
+  usePageNavigationReady,
   type NavigationResult,
 } from '../../src/observability/navigation-timing';
 import { reportSafetyEvent } from '../../src/analytics/error-tracking';
@@ -221,4 +222,52 @@ it('records first visible separately from interactive Ready and admits the canon
       appVersion: '1.0.0', clientType: 'web', captureSource: 'web/test', env: 'test', reportedAt: new Date().toISOString() });
     expect(parseClientMetricEvent('client_navigation_result', { ...value, ...common })).not.toBeNull();
   }
+});
+
+
+it('page readiness waits for router commit, then distinguishes visible from interactive', () => {
+  const id = navigationTiming.beginPage(home, { kind: 'home', view: 'settings' });
+  const { rerender } = renderHook(({ ready }) => usePageNavigationReady({ page: 'settings', visible: true, ready }), { initialProps: { ready: false } });
+  navigationTiming.observeRoute({ kind: 'home', view: 'settings' });
+  expect(navigationTiming.getSnapshot()?.routeCommitted).toBe(false);
+  act(() => navigationTiming.commit(id));
+  // rAF is stubbed in the following dedicated controller test; no eager Ready here.
+  expect(navigationTiming.isCurrent(id)).toBe(true);
+  rerender({ ready: true });
+  cleanup(); navigationTiming.cancel('page_exit');
+});
+
+it('page state machine deduplicates terminal results, excludes rejected/stale completions', () => {
+  const events: NavigationResult[] = [];
+  let tick = 100;
+  const timing = createNavigationTiming({ now: () => tick, id: () => String(++tick), emit: e => events.push(e) });
+  const id = timing.beginPage(home, { kind: 'home', view: 'settings' });
+  timing.firstVisible(id); timing.finish(id, 'ready');
+  expect(events.map(e => e.status)).toEqual(['started']);
+  timing.commit(id); tick += 20; timing.firstVisible(id); timing.firstVisible(id);
+  timing.finish(id, 'ready'); timing.finish(id, 'ready');
+  expect(events.map(e => e.status)).toEqual(['started', 'first_visible', 'ready']);
+  expect(events[2]).toMatchObject({ navigation_type: 'page_switch', target_type: 'page', target_page: 'settings', duration_ms: 20 });
+  const next = timing.beginPage(home, { kind: 'home', view: 'tasks' });
+  timing.finish(next, 'cancelled', 'guard_rejected'); timing.commit(next); timing.finish(next, 'ready');
+  expect(events.at(-1)?.status).toBe('cancelled');
+});
+
+it('page hook emits visible then Ready on foreground frames and cancels on scope changes', () => {
+  let callbacks: FrameRequestCallback[] = [];
+  vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => { callbacks.push(cb); return callbacks.length; });
+  vi.stubGlobal('cancelAnimationFrame', vi.fn());
+  const flush = () => act(() => { const queued = callbacks; callbacks = []; queued.forEach(cb => cb(0)); });
+  const id = navigationTiming.beginPage(home, { kind: 'home', view: 'settings' });
+  const { rerender, unmount } = renderHook(({ ready, scopeKey }) => usePageNavigationReady({ page: 'settings', visible: true, ready, scopeKey }), { initialProps: { ready: false, scopeKey: 'a' } });
+  flush(); expect(navigationTiming.getSnapshot()?.firstVisible).toBe(false);
+  act(() => navigationTiming.commit(id)); flush();
+  expect(navigationTiming.getSnapshot()?.firstVisible).toBe(true);
+  rerender({ ready: true, scopeKey: 'a' }); flush();
+  expect(navigationTiming.getSnapshot()).toBeNull();
+  const next = navigationTiming.beginPage(home, { kind: 'home', view: 'settings' });
+  act(() => navigationTiming.commit(next));
+  rerender({ ready: false, scopeKey: 'b' }); flush();
+  expect(navigationTiming.getSnapshot()).toBeNull();
+  unmount(); vi.unstubAllGlobals();
 });

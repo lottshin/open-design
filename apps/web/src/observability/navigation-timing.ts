@@ -1,5 +1,5 @@
 // Intent tracking is web-owned; emitted payloads use the shared metric schema.
-import { useLayoutEffect, useSyncExternalStore } from 'react';
+import { useLayoutEffect, useRef, useSyncExternalStore } from 'react';
 import { reportSafetyEvent } from '../analytics/error-tracking';
 import { clearChatOpenIntent, markChatOpenIntent } from './chat-health';
 
@@ -16,13 +16,16 @@ export type NavigationFailure =
   | 'project_unavailable'
   | 'scope_unavailable'
   | 'conversations_unavailable'
-  | 'messages_unavailable';
+  | 'messages_unavailable'
+  | 'page_unavailable';
 export type NavigationCancellation = 'superseded' | 'route_changed' | 'page_exit' | 'scope_changed' | 'guard_rejected' | 'same_route';
 export interface NavigationResult {
   navigation_id: string;
-  navigation_type: 'project_entry' | 'conversation_switch';
+  navigation_type: 'project_entry' | 'conversation_switch' | 'page_switch';
   source_type: string;
-  target_type: 'project' | 'conversation';
+  target_type: 'project' | 'conversation' | 'home' | 'page';
+  source_page?: string;
+  target_page?: string;
   status: 'started' | 'first_visible' | 'ready' | 'cancelled' | 'failed';
   started_at: string;
   duration_ms: number;
@@ -36,9 +39,15 @@ interface NavigationAttempt {
   routeCommitted: boolean;
   source: string;
   projectId: string;
+  targetPage?: string;
+  sourcePage?: string;
   conversationId?: string;
   navigationType: NavigationResult['navigation_type'];
   sourceType: string;
+}
+
+export function navigationPage(route: NavigationLocation): string {
+  return route.kind === 'home' ? route.view ?? 'home' : route.kind;
 }
 
 function routeKey(route: NavigationLocation): string {
@@ -62,7 +71,8 @@ export function createNavigationTiming(deps: {
       started_at: attempt.startedAtIso,
       navigation_type: attempt.navigationType,
       source_type: attempt.sourceType,
-      target_type: attempt.conversationId ? 'conversation' : 'project',
+      target_type: attempt.targetPage ? (attempt.targetPage === 'home' ? 'home' : 'page') : attempt.conversationId ? 'conversation' : 'project',
+      ...(attempt.targetPage ? { source_page: attempt.sourcePage, target_page: attempt.targetPage } : {}),
       status,
       duration_ms: status === 'started' ? 0 : Math.max(0, Math.round(deps.now() - attempt.startedAt)),
       ...(reason ? { reason } : {}),
@@ -101,8 +111,24 @@ export function createNavigationTiming(deps: {
       notify();
       return attempt.id;
     },
+    beginPage(source: NavigationLocation, target: NavigationLocation, origin?: { at: number; iso: string }): string {
+      cancel('superseded');
+      const attempt: NavigationAttempt = {
+        id: deps.id(), startedAt: origin?.at ?? deps.now(), startedAtIso: origin?.iso ?? new Date().toISOString(),
+        firstVisible: false, routeCommitted: false, source: routeKey(source),
+        projectId: '', targetPage: navigationPage(target), sourcePage: navigationPage(source),
+        navigationType: 'page_switch', sourceType: source.kind === 'home' ? 'home' : source.kind,
+      };
+      active = attempt; arrived = false; emit(attempt, 'started'); notify();
+      return attempt.id;
+    },
     observeRoute(route: NavigationLocation): void {
       if (!active) return;
+      if (active.targetPage) {
+        // observeRoute is a render witness; router onCommit alone owns the gate.
+        if (navigationPage(route) !== active.targetPage && (arrived || routeKey(route) !== active.source)) cancel('route_changed');
+        return;
+      }
       const matchesTarget = route.kind === 'project' && route.projectId === active.projectId
         && (!active.conversationId || route.conversationId === active.conversationId);
       if (matchesTarget) commit(active.id);
@@ -131,7 +157,7 @@ export const navigationTiming = createNavigationTiming({
   id: () => globalThis.crypto?.randomUUID?.()
     ?? `nav-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`,
   emit: (result) => {
-    if (result.status === 'started') {
+    if (result.status === 'started' && result.navigation_type !== 'page_switch') {
       markChatOpenIntent(result.navigation_type === 'project_entry' ? 'project_switch' : 'conversation_switch');
     } else if (result.status !== 'ready' && result.status !== 'first_visible') {
       clearChatOpenIntent();
@@ -187,4 +213,39 @@ export function useProjectNavigationReady(input: {
       document.removeEventListener('visibilitychange', check);
     };
   }, [attempt, projectId, conversationId, ready, failure, visible]);
+}
+
+
+/** Targets call this after their data/actions commit. Router commit is necessary
+ * but insufficient; mounting a route placeholder never declares Ready. */
+export function usePageNavigationReady(input: {
+  page: string; visible: boolean; ready: boolean; failure?: boolean; scopeKey?: string;
+}): void {
+  const attempt = useSyncExternalStore(navigationTiming.subscribe, navigationTiming.getSnapshot, serverSnapshot);
+  const { page, visible, ready, failure = false, scopeKey } = input;
+  const scope = useRef<{ id: string; key: string | undefined } | null>(null);
+  useLayoutEffect(() => {
+    if (!attempt?.targetPage || attempt.targetPage !== page) return;
+    if (scope.current?.id === attempt.id && scope.current.key !== scopeKey) {
+      navigationTiming.finish(attempt.id, 'cancelled', 'scope_changed'); return;
+    }
+    scope.current = { id: attempt.id, key: scopeKey };
+    if (failure) { navigationTiming.finish(attempt.id, 'failed', 'page_unavailable'); return; }
+    if (!attempt.routeCommitted || (!visible && !ready)) return;
+    let frame: number | null = null;
+    const check = () => {
+      if (document.visibilityState !== 'visible' || frame !== null) return;
+      frame = requestAnimationFrame(() => {
+        frame = null;
+        if (document.visibilityState !== 'visible') return;
+        if (visible) navigationTiming.firstVisible(attempt.id);
+        if (ready) navigationTiming.finish(attempt.id, 'ready');
+      });
+    };
+    check(); document.addEventListener('visibilitychange', check);
+    return () => {
+      if (frame !== null) cancelAnimationFrame(frame);
+      document.removeEventListener('visibilitychange', check);
+    };
+  }, [attempt, page, visible, ready, failure, scopeKey]);
 }
