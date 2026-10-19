@@ -40,7 +40,9 @@ export type MemorySamplerOptions = {
   report(samples: ProcessMemorySample[], signal: AbortSignal): Promise<unknown> | void;
   intervalMs?: number;
   initialDelayMs?: number;
-  isEnabled?: () => Promise<boolean> | boolean;
+  /** Monotonic Electron ready timestamp, including packaged sidecar boot time. */
+  readyAtMs?: number;
+  isEnabled?: (signal: AbortSignal) => Promise<boolean> | boolean;
 };
 
 export type MemorySampler = { stop(): void };
@@ -58,7 +60,8 @@ export function startMemorySampler(options: MemorySamplerOptions): MemorySampler
   if (!Number.isInteger(intervalMs) || intervalMs < 1 || intervalMs > 2_147_483_647) {
     throw new RangeError('Memory sampling interval must be an integer from 1 to 2147483647 ms');
   }
-  const initialDelayMs = options.initialDelayMs ?? 30_000;
+  const readyAtMs = options.readyAtMs ?? performance.now();
+  const initialDelayMs = options.initialDelayMs ?? Math.max(0, Math.ceil(30_000 - (performance.now() - readyAtMs)));
   if (!Number.isInteger(initialDelayMs) || initialDelayMs < 0 || initialDelayMs > 2_147_483_647) throw new RangeError("Invalid initial sample delay");
   const context = { ...options.context };
   const startedAt = performance.now();
@@ -71,7 +74,7 @@ export function startMemorySampler(options: MemorySamplerOptions): MemorySampler
     if (stopped || busy) return;
     busy = true;
     try {
-      if (options.isEnabled && !await options.isEnabled()) return;
+      if (options.isEnabled && !await options.isEnabled(controller.signal)) return;
       if (stopped) return;
       const at = Date.now();
       const common = { ...context, sampled_at: new Date(at).toISOString(), sampling_interval_ms: intervalMs };
@@ -139,4 +142,15 @@ export function startMemorySampler(options: MemorySamplerOptions): MemorySampler
 
 function bytesOrNull(value: number): number | null {
   return Number.isFinite(value) && value >= 0 ? Math.round(value) : null;
+}
+
+/** Consent and response-body reads share sampler cancellation and a 3s budget. */
+export async function readMemorySamplingConsent(discover: () => Promise<string>, signal: AbortSignal): Promise<boolean> {
+  try {
+    const requestSignal = AbortSignal.any([signal, AbortSignal.timeout(3000)]);
+    const base = await discover();
+    requestSignal.throwIfAborted();
+    const response = await fetch(new URL('/api/analytics/config', base), { signal: requestSignal });
+    return response.ok && (await response.json() as { enabled?: boolean }).enabled === true;
+  } catch { return false; }
 }

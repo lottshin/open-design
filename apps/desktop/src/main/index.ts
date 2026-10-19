@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { BrowserWindow, Menu, app, dialog, globalShortcut, ipcMain, powerMonitor, shell, type MenuItemConstructorOptions } from "electron";
 import { attachStartupReadyIpc, createStartupTiming, type StartupTiming } from "./startup-timing.js";
 import { beginLaunchMarker } from "./launch-type.js";
-import { startMemorySampler } from "./memory-sampler.js";
+import { startMemorySampler, readMemorySamplingConsent } from "./memory-sampler.js";
 export { createStartupTiming, type StartupTiming } from "./startup-timing.js";
 
 import {
@@ -47,7 +47,7 @@ import { createDesktopRuntime, type DesktopRuntime } from "./runtime.js";
 import { dispatchInviteDeeplink, registerInviteDeeplink } from "./invite-deeplink.js";
 import { focusDesktopForDeeplink } from "./deeplink-focus.js";
 import { setUpDesktopCrashReporter, writeDesktopGpuInfo } from "./crash-diagnostics.js";
-import { beginDesktopSession, clearReportedCrash, endDesktopSessionCleanly, markDesktopSessionRunning, recordDesktopHostEvent } from "./session-lifecycle.js";
+import { beginDesktopSession, clearReportedCrash, endDesktopSessionCleanly, markDesktopSessionRunning, recordDesktopHostEvent, recordDesktopSessionExit } from "./session-lifecycle.js";
 import {
   attachDesktopChildProcessCrashReporter,
   reportDesktopObservabilityEvent,
@@ -198,6 +198,7 @@ export function applyLoopbackConnectionLimitSwitch(electronApp: Electron.App): v
 }
 
 export type DesktopMainOptions = {
+  electronReadyAtMs?: number;
   /** Carries the packaged process origin and sidecar phases into desktop. */
   startupTiming?: StartupTiming | null;
   beforeShutdown?: (record?: (event: UpdateLifecycleObservation) => Promise<void>) => Promise<void>;
@@ -735,17 +736,14 @@ async function runDesktopMainWithTiming(
   await app.whenReady();
   startupTiming.mark("electron_ready");
   const memorySampler = startMemorySampler({
+    readyAtMs: options.electronReadyAtMs ?? performance.now(),
     context: { app_session_id: startupTiming.context().app_session_id, app_version: options.update?.currentVersion ?? app.getVersion(),
       environment: null, platform: process.platform, arch: process.arch, os_version: process.getSystemVersion() },
     app,
     getManagedRendererPids: () => BrowserWindow.getAllWindows()
       .filter(window => !window.isDestroyed() && !window.webContents.isDestroyed())
       .map(window => window.webContents.getOSProcessId()),
-    isEnabled: async () => {
-      const base = await resolveDaemonBaseUrl(options)();
-      const response = await fetch(new URL("/api/analytics/config", base), { signal: AbortSignal.timeout(3000) });
-      return response.ok && (await response.json() as { enabled?: boolean }).enabled === true;
-    },
+    isEnabled: signal => readMemorySamplingConsent(resolveDaemonBaseUrl(options), signal),
     report: async (samples, signal) => {
       for (const sample of samples) {
         if (signal.aborted) break;
@@ -836,9 +834,11 @@ async function runDesktopMainWithTiming(
   const { previousUncleanSessions } = beginDesktopSession({
     stateFilePath: sessionStatePath,
     sessionId: startupTiming.context().app_session_id,
-    version: app.getVersion(),
+    version: options.update?.currentVersion ?? app.getVersion(),
+    launchAttemptId: options.startupTiming === null ? null : startupTiming.context().launch_attempt_id,
     now: () => new Date(),
   });
+  process.once("exit", code => recordDesktopSessionExit({ stateFilePath: sessionStatePath }, code));
   // Sleep, shutdown, session end and an unfinished quit are recorded into this
   // run's marker, so a later unclean exit can say how the run ended.
   attachDesktopHostLifecycleRecorder({
@@ -1041,6 +1041,7 @@ async function runDesktopMainWithTiming(
   startupTiming.mark("window_creating");
   desktop = await createDesktopRuntime({
     desktopAuthSecret,
+    telemetryContext: { ...startupTiming.context(), launch_attempt_id: options.startupTiming === null ? null : startupTiming.context().launch_attempt_id, app_version: options.update?.currentVersion ?? app.getVersion() },
     discoverUrl: options.discoverWebUrl,
     discoverDaemonUrl: options.discoverDaemonUrl,
     osLocale,
@@ -1115,7 +1116,7 @@ async function runDesktopMainWithTiming(
     });
     void reportPriorDesktopUncleanExits({
       previousUncleanSessions,
-      currentVersion: app.getVersion(),
+      currentVersion: options.update?.currentVersion ?? app.getVersion(),
       stateFilePath: sessionStatePath,
       report: (event, properties) => reportDesktopObservabilityEvent(discoverDaemonBaseUrl, event, properties),
       clearReported: clearReportedCrash,
@@ -1126,7 +1127,9 @@ async function runDesktopMainWithTiming(
   // vanishes), and the child can't report itself. `clean-exit` is normal teardown.
   attachDesktopChildProcessCrashReporter(
     app,
-    (event, properties) => reportDesktopObservabilityEvent(discoverDaemonBaseUrl, event, properties),
+    (event, properties) => reportDesktopObservabilityEvent(discoverDaemonBaseUrl, event, {
+      ...startupTiming.context(), launch_attempt_id: options.startupTiming === null ? null : startupTiming.context().launch_attempt_id, app_version: options.update?.currentVersion ?? app.getVersion(), ...properties,
+    }),
   );
   removeDiagnosticsIpc = registerDesktopDiagnosticsIpc({
     discoverDaemonBaseUrl: resolveDaemonBaseUrl(options),

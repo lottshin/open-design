@@ -38,6 +38,8 @@ import {
   buildClientTelemetryParams,
   isClientMetricEventName,
   parseClientMetricEvent,
+  isProcessExitEventName,
+  processExitMetricFields,
 } from '@open-design/contracts/analytics';
 import { readAppConfig, readMetricsConsent } from './app-config.js';
 import { readTelemetryEnvironment } from './telemetry-environment.js';
@@ -347,14 +349,14 @@ export function createAnalyticsService(args: {
   const sharedProperties = async (
     properties: Record<string, unknown>, appVersion: string, eventId: string,
     deviceId: string, clientType: 'web' | 'desktop' | 'daemon' | 'external_mcp',
-    sessionId: string | null, captureSource: string,
+    sessionId: string | null, captureSource: string, preserveUnknownAppVersion = false,
   ) => {
     const current = normalizeTelemetryAppVersion(appVersion)
       ? resolveAppVersionInfo({ env, packagedRuntime, packageMetadata: { version: appVersion } })
       : await readCurrentAppVersionInfo({ env, packagedRuntime });
     return buildClientTelemetryParams(properties, {
       eventId, deviceId, appSessionId: sessionId, appVersion: current.version,
-      channel: current.channel, clientType, captureSource, env: cfg.env,
+      ...(preserveUnknownAppVersion ? {} : { channel: current.channel }), preserveUnknownAppVersion, clientType, captureSource, env: cfg.env,
       platform: process.platform,
       // os.release() is a kernel release on macOS/Linux, not the product OS
       // version. Preserve the legacy $os_version below, but leave the new
@@ -461,8 +463,8 @@ export function createAnalyticsService(args: {
       }
     },
     captureSafety: async ({ eventName, distinctId, appVersion, properties, insertId }) => {
-      // Error/crash safety events bypass usage consent; periodic memory is
-      // the metrics exception and rechecks consent below.
+      // Structural process-exit/launch/memory metrics honor usage consent,
+      // including the legacy exit carriers. Other safety events retain their policy.
       // We still fall back gracefully when the installationId is missing
       // (cold start before the daemon has stamped one in app-config) by
       // synthesizing an anonymous distinct id rooted at the process boot.
@@ -475,15 +477,18 @@ export function createAnalyticsService(args: {
       // See codex review on PR #2527 (Siri-Ray) for the original race.
       const resolvedInsertId = insertId ?? randomInsertId();
       try {
-        if (eventName === 'client_process_memory_sample') {
+        if (isClientMetricEventName(eventName) || isProcessExitEventName(eventName)) {
           if (!(await readMetricsConsent(args.dataDir)).metrics) return;
         }
         const resolvedDistinctId =
           distinctId && distinctId.length > 0
             ? distinctId
             : await readInstallationIdSafe(args.dataDir);
-        const common = await sharedProperties(properties, appVersion, resolvedInsertId,
-          resolvedDistinctId, 'daemon', null, 'daemon/safety');
+        const backfill = eventName === 'desktop_unclean_exit' || eventName === 'daemon_unclean_exit';
+        const source = backfill ? { ...properties, app_version: processExitMetricFields(eventName, properties).previous_app_version,
+          app_session_id: properties.app_session_id ?? properties.previous_session_id ?? null } : properties;
+        const common = await sharedProperties(source, appVersion, resolvedInsertId,
+          resolvedDistinctId, 'daemon', null, 'daemon/safety', backfill);
         const metric = isClientMetricEventName(eventName)
           ? parseClientMetricEvent(eventName, { ...properties, ...common }) : null;
         if (isClientMetricEventName(eventName) && !metric) return;
@@ -499,6 +504,15 @@ export function createAnalyticsService(args: {
             $insert_id: common.event_id,
           },
         });
+        if (isProcessExitEventName(eventName)) {
+          const exitId = `${common.event_id}:exit`;
+          const exit = parseClientMetricEvent('client_process_exit', {
+            ...common, ...processExitMetricFields(eventName, properties), event_id: exitId,
+            device_id: common.device_id === SYNTHETIC_DISTINCT_ID ? null : common.device_id,
+          });
+          if (exit) client.capture({ distinctId: common.device_id ?? resolvedDistinctId, event: 'client_process_exit',
+            properties: { ...exit, $insert_id: exitId } });
+        }
       } catch {
         // Capture failures must never propagate. The whole point of this
         // path is best-effort observability into a degraded state.

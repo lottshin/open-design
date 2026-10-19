@@ -549,6 +549,15 @@ describe('buildPackagedDaemonSpawnEnv', () => {
     };
   }
 
+
+it('passes the original desktop attempt/session to the daemon before it starts', () => {
+  const env = buildPackagedDaemonSpawnEnv(fakePaths(), {
+    appVersion: '1.0.0-beta.1', daemonCliEntry: null, requireDesktopAuth: true,
+    launchContext: { app_session_id: 'session-1', launch_attempt_id: 'attempt-1' },
+  });
+  expect(env).toMatchObject({ OD_APP_SESSION_ID: 'session-1', OD_LAUNCH_ATTEMPT_ID: 'attempt-1', OD_APP_VERSION: '1.0.0-beta.1' });
+});
+
   it('uses the namespace runtime root for child processes without reading cwd', () => {
     const cwd = vi.spyOn(process, 'cwd').mockImplementation(() => {
       throw new Error('uv_cwd');

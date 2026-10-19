@@ -320,3 +320,30 @@ it.each(['{"telemetry":{"metrics":false}', 'null', '[]'])(
     } finally { await service.shutdown(); await rm(dataDir, { recursive: true, force: true }); }
   },
 );
+
+it('emits consent-gated exit metrics with occurrence version, bounded reasons and stable dedup IDs', async () => {
+  posthogCapture.mockReset();
+  const dataDir = await mkdtemp(path.join(tmpdir(), 'od-exit-replay-'));
+  const config = path.join(dataDir, 'app-config.json');
+  try {
+    await writeFile(config, JSON.stringify({ installationId: 'installation-1', telemetry: { metrics: true } }));
+    const { createAnalyticsService } = await import('../src/analytics.js');
+    const service = createAnalyticsService({ dataDir, env: { POSTHOG_KEY: 'phc_test' } });
+    const properties = { previous_app_version: '1.0.0-beta.1', app_session_id: 'previous-session', launch_attempt_id: 'previous-launch',
+      reason: 'unknown', occurred_at: '2026-10-16T01:00:00.000Z', occurrence_time_source: 'last_checkpoint', pid: 123, path: '/private' };
+    for (const reason of ['unknown', 'killed', 'oom', 'recovery-attempt', 'clean-exit']) {
+      await service.captureSafety({ eventName: 'daemon_unclean_exit', appVersion: '2.0.0', insertId: `old-exit-${reason}`, properties: { ...properties, reason } });
+    }
+    const metrics = posthogCapture.mock.calls.map(([call]) => call).filter(call => call.event === 'client_process_exit');
+    expect(metrics).toHaveLength(5);
+    expect(metrics.map(call => call.properties.reason)).toEqual(['unknown', 'killed', 'oom', 'recovery-attempt', 'clean-exit']);
+    expect(metrics[0]).toMatchObject({ properties: { app_version: '1.0.0-beta.1', channel: 'beta', app_session_id: 'previous-session',
+      launch_attempt_id: 'previous-launch', $insert_id: 'old-exit-unknown:exit', occurred_at: properties.occurred_at } });
+    expect(metrics[0]!.properties).not.toHaveProperty('pid'); expect(metrics[0]!.properties).not.toHaveProperty('path');
+    await writeFile(config, '{"telemetry":{"metrics":false}');
+    const count = posthogCapture.mock.calls.length;
+    await service.captureSafety({ eventName: 'daemon_unclean_exit', appVersion: '2.0.0', properties });
+    expect(posthogCapture).toHaveBeenCalledTimes(count);
+    await service.shutdown();
+  } finally { await rm(dataDir, { recursive: true, force: true }); }
+});

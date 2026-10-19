@@ -1,3 +1,4 @@
+import { afterAll } from "vitest";
 import { parseClientMetricEvent } from '@open-design/contracts/analytics';
 /**
  * Coverage for the packaged main-process startup-failure telemetry
@@ -32,6 +33,10 @@ import {
   reportLaunchEvent,
 } from '../src/startup-telemetry.js';
 
+const consentRoot = mkdtempSync(join(tmpdir(), 'od-startup-consent-'));
+writeFileSync(join(consentRoot, 'app-config.json'), JSON.stringify({ telemetry: { metrics: true } }));
+afterAll(() => rmSync(consentRoot, { recursive: true, force: true }));
+
 describe('launch timing transport', () => {
   it('preserves occurrence identity/time and does not invent an installation identity', async () => {
     const fetchImpl = vi.fn<typeof fetch>(async () => new Response('{}'));
@@ -46,7 +51,7 @@ describe('launch timing transport', () => {
     const root = mkdtempSync(join(tmpdir(), 'od-launch-identity-'));
     try {
       writeFileSync(join(root, 'installation.json'), JSON.stringify({ installationId: 'installation-1' }));
-      await reportLaunchEvent({ ...args, installationRoot: root }, { fetchImpl, now: () => '2026-10-16T00:00:02.000Z' });
+      await reportLaunchEvent({ dataRoot: consentRoot, ...args, installationRoot: root }, { fetchImpl, now: () => '2026-10-16T00:00:02.000Z' });
       const body = JSON.parse(String(fetchImpl.mock.calls[0]?.[1]?.body));
       expect(body.properties).toMatchObject({ event_schema_version: 4, client_type: 'desktop' });
       expect(parseClientMetricEvent(body.event, body.properties)).not.toBeNull();
@@ -372,6 +377,7 @@ describe('reportStartupFailure', () => {
     const fetchImpl = vi.fn().mockResolvedValue(new Response('ok'));
     await reportStartupFailure(
       {
+        dataRoot: consentRoot,
         error: new Error(DAEMON_EXIT_MESSAGE),
         isPathAccess: false,
         posthogKey: 'phc_test',
@@ -387,7 +393,7 @@ describe('reportStartupFailure', () => {
         now: () => '2026-06-23T00:00:00.000Z',
       },
     );
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
     const [, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
     const props = (JSON.parse(init.body as string) as { properties: Record<string, unknown> })
       .properties;
@@ -404,6 +410,7 @@ describe('reportStartupFailure', () => {
     await expect(
       reportStartupFailure(
         {
+        dataRoot: consentRoot,
           error: new Error(DAEMON_EXIT_MESSAGE),
           isPathAccess: false,
           posthogKey: 'phc_test',
@@ -427,6 +434,7 @@ describe('reportStartupFailure', () => {
     const fetchImpl = vi.fn();
     await reportStartupFailure(
       {
+        dataRoot: consentRoot,
         error: new Error(DAEMON_EXIT_MESSAGE),
         isPathAccess: false,
         posthogKey: null,
@@ -455,6 +463,7 @@ describe('reportStartupFailure', () => {
     error.stack = `${error.message}\n    at file:///Users/liudetao/App/Contents/Resources/app/prebundled/daemon/server.mjs:1:1`;
     await reportStartupFailure(
       {
+        dataRoot: consentRoot,
         error,
         isPathAccess: false,
         posthogKey: 'phc_test',
@@ -488,6 +497,7 @@ describe('reportStartupFailure', () => {
     const fetchImpl = vi.fn().mockResolvedValue(new Response('ok'));
     await reportStartupFailure(
       {
+        dataRoot: consentRoot,
         error: new Error('boom'),
         isPathAccess: false,
         posthogKey: 'phc_test',
@@ -562,6 +572,7 @@ SqliteError: database disk image is malformed
     });
     await reportStartupFailure(
       {
+        dataRoot: consentRoot,
         error: spawnError,
         isPathAccess: false,
         posthogKey: 'phc_test',
@@ -590,6 +601,7 @@ SqliteError: database disk image is malformed
     delete (empty as { stack?: string }).stack;
     await reportStartupFailure(
       {
+        dataRoot: consentRoot,
         error: empty,
         isPathAccess: false,
         posthogKey: 'phc_test',
@@ -612,6 +624,7 @@ SqliteError: database disk image is malformed
     const fetchImpl = vi.fn().mockResolvedValue(new Response('ok'));
     await reportStartupFailure(
       {
+        dataRoot: consentRoot,
         error: new Error(DAEMON_EXIT_MESSAGE),
         isPathAccess: false,
         posthogKey: 'phc_test',
@@ -667,6 +680,7 @@ describe('errno triplet privacy', () => {
     });
     await reportStartupFailure(
       {
+        dataRoot: consentRoot,
         error: err,
         isPathAccess: false,
         posthogKey: 'phc_test',
@@ -719,6 +733,7 @@ describe('daemon_log_tail (unparseable log recovery)', () => {
     const fetchImpl = vi.fn().mockResolvedValue(new Response('ok'));
     await reportStartupFailure(
       {
+        dataRoot: consentRoot,
         error: new Error(DAEMON_EXIT_MESSAGE),
         isPathAccess: false,
         posthogKey: 'phc_test',
@@ -790,4 +805,30 @@ describe('daemon_log_tail (unparseable log recovery)', () => {
     const props = await captureProps(async () => '\n   \n\n');
     expect(props.daemon_log_tail).toBeNull();
   });
+});
+
+it.each(['false', 'corrupt', 'unavailable'])('does not report startup exits when metrics consent is %s', async state => {
+  const root = mkdtempSync(join(tmpdir(), 'od-exit-consent-'));
+  const fetchImpl = vi.fn();
+  try {
+    writeFileSync(join(root, 'app-config.json'), state === 'false' ? '{"telemetry":{"metrics":false}}' : '{');
+    await reportStartupFailure({ dataRoot: state === 'unavailable' ? null : root, error: new Error('daemon failed'),
+      isPathAccess: false, posthogKey: 'phc_test', posthogHost: null, distinctId: 'installation-1',
+      appVersion: '1.0.0', namespace: 'test', source: 'packaged' }, { fetchImpl });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+it.each(['daemon', 'web'])('correlates injected %s startup failure with its launch and emits a private-data-free exit metric', async role => {
+  const fetchImpl = vi.fn().mockResolvedValue(new Response('ok'));
+  await reportStartupFailure({ dataRoot: consentRoot,
+    error: new Error(`daemon exited before reporting status (code=1, signal=none); see /private/${role}/latest.log for details`),
+    isPathAccess: false, posthogKey: 'phc_test', posthogHost: null, distinctId: 'installation-1',
+    appVersion: '1.0.0-beta.1', namespace: 'test', source: 'packaged',
+    launchContext: { app_session_id: 'session-1', launch_attempt_id: 'launch-1' } }, { fetchImpl, readLogTail: async () => null });
+  const payloads = fetchImpl.mock.calls.map(([, init]) => JSON.parse((init as RequestInit).body as string));
+  const exit = payloads.find(p => p.event === 'client_process_exit');
+  expect(exit.properties).toMatchObject({ app_session_id: 'session-1', launch_attempt_id: 'launch-1',
+    app_version: '1.0.0-beta.1', reason: 'crash', process_role: role });
+  for (const key of ['log_path', 'native_module_path', 'error_stack', 'error_message', 'daemon_log_tail', 'pid']) expect(exit.properties).not.toHaveProperty(key);
 });

@@ -17,10 +17,8 @@
 //    in Promise.race with a hard timeout, and swallows every error — it can
 //    neither block nor crash the exit.
 //
-// Consent: startup-crash telemetry follows the existing `captureSafety` policy
-// in apps/daemon/src/analytics.ts — stability data is retained even for
-// opted-out users (and the main process cannot read daemon consent anyway,
-// since the daemon isn't up). The Settings → Privacy copy MUST call this out.
+// Consent: read the resolved daemon config root directly on this fatal path.
+// Opt-out or unavailable/corrupt consent suppresses startup exit telemetry.
 //
 // Payload PII: the free-form crash fields (error_message, error_stack) and every
 // path we send (log_path, native_module_path) run through `scrubUserPaths` to
@@ -28,7 +26,7 @@
 // errors are module-resolution / daemon-exit messages, not user content, so this
 // bounds the exposure to build/OS strings rather than anything the user typed.
 
-import { buildClientTelemetryParams, isClientMetricEventName, parseClientMetricEvent } from "@open-design/contracts/analytics";
+import { buildClientTelemetryParams, isClientMetricEventName, parseClientMetricEvent, processExitMetricFields, classifyProcessExit } from "@open-design/contracts/analytics";
 import { readFile } from "node:fs/promises";
 import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -438,10 +436,24 @@ export async function captureStartupFailure(
 // CS02-local event names pending CS01 registry alignment. Unlike the legacy
 // crash path, launch denominators require a real installation identity: never
 // group unrelated installations under the synthetic namespace fallback.
+/** Standalone startup cannot ask a dead daemon; read its resolved config root. */
+export async function readStartupMetricsConsent(dataRoot: string | null | undefined): Promise<boolean> {
+  if (!dataRoot) return false;
+  try {
+    const value: unknown = JSON.parse(await readFile(join(dataRoot, 'app-config.json'), 'utf8'));
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+    const telemetry = (value as { telemetry?: unknown }).telemetry;
+    if (telemetry === undefined) return true; // Same first-install default as daemon.
+    return !!telemetry && typeof telemetry === 'object' && !Array.isArray(telemetry)
+      && (telemetry as { metrics?: unknown }).metrics === true;
+  } catch (error) { return (error as NodeJS.ErrnoException).code === 'ENOENT'; }
+}
+
 export async function reportLaunchEvent(args: {
   posthogKey: string | null;
   posthogHost: string | null;
   installationRoot: string | null;
+  dataRoot?: string | null;
   namespace: string;
   appVersion: string | null;
   channel: string;
@@ -449,7 +461,7 @@ export async function reportLaunchEvent(args: {
   properties: Record<string, unknown>;
 }, deps: CaptureDeps = {}): Promise<void> {
   try {
-    if (!args.posthogKey?.trim() || !args.installationRoot) return;
+    if (!args.posthogKey?.trim() || !args.installationRoot || !await readStartupMetricsConsent(args.dataRoot)) return;
     const identity = JSON.parse(readFileSync(join(args.installationRoot, "installation.json"), "utf8")) as { installationId?: unknown };
     if (typeof identity.installationId !== "string" || !identity.installationId.trim()) return;
     const occurredAt = args.properties.occurred_at;
@@ -470,6 +482,8 @@ export async function reportLaunchEvent(args: {
 }
 
 export interface ReportStartupFailureArgs {
+  dataRoot?: string | null;
+  launchContext?: { app_session_id: string; launch_attempt_id: string };
   error: unknown;
   isPathAccess: boolean;
   posthogKey: string | null;
@@ -497,6 +511,7 @@ export async function reportStartupFailure(
   deps: ReportDeps = {},
 ): Promise<void> {
   try {
+    if (!await readStartupMetricsConsent(args.dataRoot)) return;
     const classification = classifyStartupFailure(args.error, args.isPathAccess);
     let errorCode: string | undefined;
     let missingModule: string | undefined;
@@ -557,6 +572,11 @@ export async function reportStartupFailure(
       nativeModulePath = scrubUserPaths(args.nativeModulePath);
     }
     const properties: Record<string, unknown> = {
+      ...args.launchContext,
+      event_id: `${args.launchContext?.launch_attempt_id ?? randomInsertId()}:failure`,
+      occurred_at: (deps.now ?? (() => new Date().toISOString()))(),
+      exit_reason: classifyProcessExit(classification.signal === 'SIGKILL' || classification.signal === 'SIGTERM' ? 'killed'
+        : classification.signal === 'SIGABRT' || classification.signal === 'SIGSEGV' || (classification.exitCode != null && classification.exitCode !== 0) ? 'crash' : 'unknown'),
       failure_kind: classification.failureKind,
       exit_code: classification.exitCode,
       signal: classification.signal,
@@ -587,7 +607,7 @@ export async function reportStartupFailure(
       source: args.source,
       platform: process.platform,
     };
-    await captureStartupFailure(
+    const legacySend = captureStartupFailure(
       {
         posthogKey: args.posthogKey,
         posthogHost: args.posthogHost,
@@ -595,8 +615,18 @@ export async function reportStartupFailure(
         event: STARTUP_FAILURE_EVENT,
         properties,
       },
-      { fetchImpl: deps.fetchImpl, timeoutMs: deps.timeoutMs, now: deps.now },
+      { fetchImpl: deps.fetchImpl, timeoutMs: deps.timeoutMs, now: deps.now, insertId: properties.event_id as string },
     );
+    const common = buildClientTelemetryParams(properties, {
+      eventId: `${properties.event_id}:exit`, deviceId: args.distinctId.startsWith("packaged-") ? null : args.distinctId, appVersion: args.appVersion,
+      clientType: 'desktop', captureSource: CAPTURE_SOURCE, env: resolveTelemetryEnv(),
+      platform: process.platform, arch: process.arch, reportedAt: (deps.now ?? (() => new Date().toISOString()))(),
+    });
+    const exit = parseClientMetricEvent('client_process_exit', { ...common,
+      ...processExitMetricFields(STARTUP_FAILURE_EVENT, properties), event_id: `${properties.event_id}:exit` });
+    const metricSend = exit ? captureStartupFailure({ ...args, event: 'client_process_exit', properties: exit },
+      { fetchImpl: deps.fetchImpl, timeoutMs: deps.timeoutMs, now: deps.now, insertId: exit.event_id as string }) : Promise.resolve();
+    await Promise.all([legacySend, metricSend]);
   } catch {
     // Reporting a startup failure must NEVER itself break the exit path.
   }

@@ -134,3 +134,17 @@ it.each(['{"telemetry":{"metrics":false}', 'null', '[]', 'false'])(
     } finally { await rm(dataDir, { recursive: true, force: true }); }
   },
 );
+
+it('does not create host fault incidents for clean exits or recovery attempts and preserves carrier dedup IDs', async () => {
+  const fault = vi.fn(() => null);
+  version.mockResolvedValue({ version: '2.0.0', channel: 'stable' });
+  await withRoutes(async url => {
+    for (const reason of ['clean-exit', 'recovery-attempt']) {
+      const response = await fetch(`${url}/api/observability/event`, { method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ event: 'desktop_renderer_crash', properties: { event_id: `exit-${reason}`, reason } }) });
+      expect(response.status).toBe(200);
+      expect(captureSafety).toHaveBeenCalledWith(expect.objectContaining({ insertId: `exit-${reason}` }));
+    }
+    expect(fault).not.toHaveBeenCalled();
+  }, fault);
+});

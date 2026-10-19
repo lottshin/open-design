@@ -12,6 +12,8 @@ import {
   buildClientTelemetryParams,
   isClientMetricEventName,
   parseClientMetricEvent,
+  isProcessExitEventName,
+  processExitMetricFields,
 } from '@open-design/contracts/analytics';
 import {
   createAnalyticsService,
@@ -21,6 +23,7 @@ import {
 import type { AnalyticsContext } from '../analytics.js';
 import { readMetricsConsent, type readAppConfig, type writeAppConfig } from '../app-config.js';
 import { readCurrentAppVersionInfo, UNKNOWN_APP_VERSION, type AppVersionInfo } from '../app-version.js';
+import { getDaemonHealth } from '../services/daemon-health.js';
 import { readTelemetryEnvironment } from '../telemetry-environment.js';
 import { reportRunFeedbackFromDaemon } from '../langfuse-bridge.js';
 import { observePendingInstallerApplyAttempts } from '../migration/index.js';
@@ -273,9 +276,10 @@ export function registerTelemetryRoutes(app: Express, deps: RegisterTelemetryRou
       res.status(!result.ok ? 400 : result.retryable ? 503 : 200).json(result);
       return;
     }
-    const incidentId = ['desktop_unclean_exit', 'desktop_renderer_crash', 'desktop_child_process_crash', 'packaged_runtime_failed'].includes(eventName)
-      ? deps.onHostFault?.(eventName, properties) : null;
-    if (eventName === 'client_process_memory_sample') {
+    const isFault = isProcessExitEventName(eventName)
+      && !['clean-exit', 'recovery-attempt'].includes(String(processExitMetricFields(eventName, properties).reason));
+    const incidentId = isFault ? deps.onHostFault?.(eventName, properties) : null;
+    if (isClientMetricEventName(eventName) || isProcessExitEventName(eventName)) {
       if (!(await readMetricsConsent(dataDir)).metrics) { res.json({ ok: true }); return; }
       const config = await deps.readAppConfig(dataDir);
       if (config.telemetry?.metrics !== true) { res.json({ ok: true }); return; }
@@ -293,12 +297,15 @@ export function registerTelemetryRoutes(app: Express, deps: RegisterTelemetryRou
       res.status(400).json({ error: 'invalid client metric properties' });
       return;
     }
+    if (['client_launch_attempt', 'client_business_ready', 'client_launch_result'].includes(eventName) && metric && typeof metric.app_session_id === 'string') {
+      getDaemonHealth()?.setLaunchContext({ app_session_id: metric.app_session_id as string, launch_attempt_id: metric.launch_attempt_id as string });
+    }
     const appVersion = await appVersionPromise;
     await analyticsService.captureSafety({
       eventName,
       appVersion: appVersion?.version ?? UNKNOWN_APP_VERSION,
       properties: { ...(metric ?? properties), ...(incidentId ? { diagnostic_incident_id: incidentId } : {}) },
-      ...(metric ? { insertId: metric.event_id as string } : {}),
+      ...(metric ? { insertId: metric.event_id as string } : typeof properties.event_id === 'string' && /^[a-zA-Z0-9_.:-]{1,128}$/.test(properties.event_id) ? { insertId: properties.event_id } : {}),
     });
     res.json({ ok: true });
   });
