@@ -80,3 +80,20 @@ describe('CS01 client metric contracts', () => {
     });
   });
 });
+
+it('validates controlled exit reasons and strips all content from normalized exit metrics', async () => {
+  const { classifyProcessExit, processExitMetricFields } = await import('../src/analytics/client-metrics.js');
+  for (const [native, reason] of [['crashed', 'crash'], ['oom', 'oom'], ['killed', 'killed'], ['clean-exit', 'clean-exit'], ['recovery-attempt', 'recovery-attempt'], ['anything-else', 'unknown']]) {
+    const props = { ...common, ...processExitMetricFields('desktop_renderer_crash', { reason: native, loop_tripped: true }),
+      prompt: 'private', pid: 123, path: '/private', url: 'https://private.invalid' };
+    const parsed = parseClientMetricEvent('client_process_exit', props);
+    expect(parsed).toMatchObject({ reason, launch_attempt_id: null, recovery_suppressed: true });
+    for (const field of ['prompt', 'pid', 'path', 'url']) expect(parsed).not.toHaveProperty(field);
+    expect(classifyProcessExit(native)).toBe(reason);
+  }
+});
+
+it('does not replace explicitly unknown prior versions with the reporting version', () => {
+  expect(buildClientTelemetryParams({ app_version: null }, { eventId: 'e', deviceId: null, appVersion: '2.0.0',
+    clientType: 'daemon', captureSource: 'daemon/safety', env: 'production', reportedAt: common.reported_at, preserveUnknownAppVersion: true })).toMatchObject({ app_version: null, client_version: null });
+});

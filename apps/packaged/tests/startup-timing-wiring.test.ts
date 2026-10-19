@@ -39,7 +39,7 @@ describe("packaged launch timing wiring", () => {
       && node.expression.name.text === "catch" && node.expression.expression.getText(ast) === "main()") as ts.CallExpression;
     const handler = call.arguments[0]!;
     const flush = Promise.withResolvers<void>();
-    const timing = { setReporter: vi.fn(), finish: vi.fn(), flush: vi.fn(() => flush.promise) };
+    const timing = { context: () => ({ app_session_id: "session-1", launch_attempt_id: "launch-1" }), setReporter: vi.fn(), finish: vi.fn(), flush: vi.fn(() => flush.promise) };
     const exit = vi.fn();
     const reportFailure = vi.fn(async () => undefined);
     const run = evaluate(`const handler = ${handler.getText(ast)}; handler;`, {

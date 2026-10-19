@@ -85,7 +85,51 @@ const memorySchema = metricCommonSchema.extend({
   sampling_interval_ms: z.number().finite().positive(),
 });
 
+/** Native evidence only: an absent checkpoint is never evidence of OOM. */
+export function classifyProcessExit(reason: unknown): 'crash' | 'oom' | 'killed' | 'clean-exit' | 'recovery-attempt' | 'unknown' {
+  if (reason === 'crashed' || reason === 'crash' || reason === 'abnormal-exit' || reason === 'fatal_error') return 'crash';
+  if (reason === 'oom' || reason === 'killed' || reason === 'clean-exit' || reason === 'recovery-attempt') return reason;
+  return 'unknown';
+}
+
+export const PROCESS_EXIT_EVENTS = ['desktop_renderer_crash', 'desktop_child_process_crash', 'desktop_unclean_exit', 'daemon_unclean_exit', 'packaged_runtime_failed'] as const;
+export function isProcessExitEventName(event: string): boolean {
+  return (PROCESS_EXIT_EVENTS as readonly string[]).includes(event);
+}
+
+const processExitSchema = metricCommonSchema.extend({
+  launch_attempt_id: token.nullable(),
+  previous_app_version: version.nullable(),
+  process_role: z.enum(['main', 'renderer', 'gpu', 'utility', 'daemon', 'web', 'unknown']),
+  reason: z.enum(['crash', 'oom', 'killed', 'clean-exit', 'recovery-attempt', 'unknown']),
+  source_event: z.enum(PROCESS_EXIT_EVENTS),
+  exit_code: z.number().int().nullable(),
+  recovery_suppressed: z.boolean(),
+  occurrence_time_source: z.enum(['observed', 'last_checkpoint', 'unknown']),
+  is_backfill: z.boolean(),
+});
+
+/** Controlled projection for the new metric; legacy payloads remain compatible. */
+export function processExitMetricFields(event: string, props: Record<string, unknown>): Record<string, unknown> {
+  const backfill = event === 'desktop_unclean_exit' || event === 'daemon_unclean_exit';
+  const priorVersion = version.safeParse(props.previous_app_version ?? props.previous_version);
+  const role = event === 'desktop_renderer_crash' ? 'renderer' : event === 'daemon_unclean_exit' ? 'daemon'
+    : event === 'desktop_child_process_crash' ? props.process_type === 'GPU' ? 'gpu' : props.process_type === 'Utility' ? 'utility' : 'unknown'
+    : event === 'packaged_runtime_failed' ? props.failure_kind === 'daemon-start' ? 'daemon' : props.failure_kind === 'web-start' ? 'web' : 'unknown' : 'main';
+  return {
+    metric_schema_version: CLIENT_METRIC_SCHEMA_VERSION, telemetry_capability: 'supported',
+    launch_attempt_id: props.launch_attempt_id ?? null,
+    previous_app_version: backfill && priorVersion.success ? priorVersion.data : null,
+    process_role: role, reason: classifyProcessExit(props.exit_reason ?? props.reason ?? props.exit_class),
+    source_event: event, exit_code: typeof props.exit_code === 'number' ? props.exit_code : null,
+    recovery_suppressed: props.recovery_suppressed === true || props.loop_tripped === true,
+    occurrence_time_source: props.occurrence_time_source ?? (backfill ? 'unknown' : 'observed'),
+    is_backfill: backfill,
+  };
+}
+
 export const CLIENT_METRIC_SCHEMAS = {
+  client_process_exit: processExitSchema,
   client_launch_attempt: launchAttemptSchema,
   client_business_ready: businessReadySchema,
   client_launch_result: launchResultSchema,
@@ -123,6 +167,8 @@ export interface ClientTelemetryDefaults {
   arch?: string | null;
   occurredAt?: string;
   reportedAt: string;
+  /** Exit replay can retain explicit unknown versions without changing legacy defaults. */
+  preserveUnknownAppVersion?: boolean;
 }
 
 /**
@@ -138,7 +184,7 @@ export function buildClientTelemetryParams(
     const parsed = version.safeParse(value);
     return parsed.success ? parsed.data : null;
   };
-  const appVersion = resolvedVersion(source.app_version) ?? resolvedVersion(defaults.appVersion);
+  const appVersion = defaults.preserveUnknownAppVersion && source.app_version === null ? null : resolvedVersion(source.app_version) ?? resolvedVersion(defaults.appVersion);
   const occurred = time.safeParse(source.occurred_at);
   return {
     event_schema_version: 4,

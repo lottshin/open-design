@@ -101,6 +101,7 @@ let startupTelemetryContext:
       installationRoot: string;
       nativeModulePath: string | null;
       channel: string;
+      dataRoot: string;
     }
   | null = null;
 
@@ -271,6 +272,7 @@ async function main(): Promise<void> {
   // startPackagedSidecars call below is THE failure this covers (daemon/web
   // dying before reporting status, e.g. issue #4638's missing better-sqlite3).
   startupTelemetryContext = {
+    dataRoot: paths.dataRoot,
     channel: launchStamp.channel,
     posthogKey: activeConfig.posthogKey,
     posthogHost: activeConfig.posthogHost,
@@ -360,6 +362,7 @@ async function main(): Promise<void> {
   const sidecarRuntime: SidecarRuntimeContext<SidecarStamp> = { ...runtime, mode: convergedStamp.mode };
 
   const sidecars = await startPackagedSidecars(sidecarRuntime, paths, {
+    launchContext: packagedStartupTiming?.context(),
     appVersion: activeConfig.appVersion,
     amrProfile: activeConfig.amrProfile,
     daemonCliEntry: activeConfig.daemonCliEntry,
@@ -582,6 +585,8 @@ void main().catch(async (error: unknown) => {
     await Promise.all([packagedStartupTiming?.flush(), reportStartupFailure({
       error,
       isPathAccess,
+      dataRoot: startupTelemetryContext.dataRoot,
+      launchContext: packagedStartupTiming?.context(),
       posthogKey: startupTelemetryContext.posthogKey,
       posthogHost: startupTelemetryContext.posthogHost,
       distinctId: resolveStartupDistinctId(

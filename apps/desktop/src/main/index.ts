@@ -47,7 +47,7 @@ import { createDesktopRuntime, type DesktopRuntime } from "./runtime.js";
 import { dispatchInviteDeeplink, registerInviteDeeplink } from "./invite-deeplink.js";
 import { focusDesktopForDeeplink } from "./deeplink-focus.js";
 import { setUpDesktopCrashReporter, writeDesktopGpuInfo } from "./crash-diagnostics.js";
-import { beginDesktopSession, clearReportedCrash, endDesktopSessionCleanly, markDesktopSessionRunning, recordDesktopHostEvent } from "./session-lifecycle.js";
+import { beginDesktopSession, clearReportedCrash, endDesktopSessionCleanly, markDesktopSessionRunning, recordDesktopHostEvent, recordDesktopSessionExit } from "./session-lifecycle.js";
 import {
   attachDesktopChildProcessCrashReporter,
   reportDesktopObservabilityEvent,
@@ -834,9 +834,11 @@ async function runDesktopMainWithTiming(
   const { previousUncleanSessions } = beginDesktopSession({
     stateFilePath: sessionStatePath,
     sessionId: startupTiming.context().app_session_id,
-    version: app.getVersion(),
+    version: options.update?.currentVersion ?? app.getVersion(),
+    launchAttemptId: options.startupTiming === null ? null : startupTiming.context().launch_attempt_id,
     now: () => new Date(),
   });
+  process.once("exit", code => recordDesktopSessionExit({ stateFilePath: sessionStatePath }, code));
   // Sleep, shutdown, session end and an unfinished quit are recorded into this
   // run's marker, so a later unclean exit can say how the run ended.
   attachDesktopHostLifecycleRecorder({
@@ -1039,6 +1041,7 @@ async function runDesktopMainWithTiming(
   startupTiming.mark("window_creating");
   desktop = await createDesktopRuntime({
     desktopAuthSecret,
+    telemetryContext: { ...startupTiming.context(), launch_attempt_id: options.startupTiming === null ? null : startupTiming.context().launch_attempt_id, app_version: options.update?.currentVersion ?? app.getVersion() },
     discoverUrl: options.discoverWebUrl,
     discoverDaemonUrl: options.discoverDaemonUrl,
     osLocale,
@@ -1113,7 +1116,7 @@ async function runDesktopMainWithTiming(
     });
     void reportPriorDesktopUncleanExits({
       previousUncleanSessions,
-      currentVersion: app.getVersion(),
+      currentVersion: options.update?.currentVersion ?? app.getVersion(),
       stateFilePath: sessionStatePath,
       report: (event, properties) => reportDesktopObservabilityEvent(discoverDaemonBaseUrl, event, properties),
       clearReported: clearReportedCrash,
@@ -1124,7 +1127,9 @@ async function runDesktopMainWithTiming(
   // vanishes), and the child can't report itself. `clean-exit` is normal teardown.
   attachDesktopChildProcessCrashReporter(
     app,
-    (event, properties) => reportDesktopObservabilityEvent(discoverDaemonBaseUrl, event, properties),
+    (event, properties) => reportDesktopObservabilityEvent(discoverDaemonBaseUrl, event, {
+      ...startupTiming.context(), launch_attempt_id: options.startupTiming === null ? null : startupTiming.context().launch_attempt_id, app_version: options.update?.currentVersion ?? app.getVersion(), ...properties,
+    }),
   );
   removeDiagnosticsIpc = registerDesktopDiagnosticsIpc({
     discoverDaemonBaseUrl: resolveDaemonBaseUrl(options),

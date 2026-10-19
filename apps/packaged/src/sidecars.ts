@@ -619,6 +619,7 @@ function createPackagedDaemonManagedPathEnv(
 }
 
 export type PackagedDaemonSpawnEnvOptions = {
+  launchContext?: { app_session_id: string; launch_attempt_id: string } | undefined;
   appVersion: string | null;
   amrProfile?: string | null;
   daemonCliEntry: string | null;
@@ -674,6 +675,7 @@ export function buildPackagedDaemonSpawnEnv(
     // fallback, but packaged runtime must not rely on path inference from
     // Electron userData, bundle names, or ports.
     ...createPackagedDaemonManagedPathEnv(paths),
+    ...(options.launchContext ? { OD_APP_SESSION_ID: options.launchContext.app_session_id, OD_LAUNCH_ATTEMPT_ID: options.launchContext.launch_attempt_id } : {}),
     ...(options.nodeCommand == null || options.nodeCommand.length === 0
       ? {}
       : { OD_NODE_BIN: options.nodeCommand }),
@@ -856,6 +858,7 @@ export async function startPackagedSidecars(
   runtime: SidecarRuntimeContext<SidecarStamp>,
   paths: PackagedNamespacePaths,
   options: {
+    launchContext?: { app_session_id: string; launch_attempt_id: string } | undefined;
     appVersion: string | null;
     amrProfile: string | null;
     daemonCliEntry: string | null;
@@ -940,6 +943,7 @@ export async function startPackagedSidecars(
       channel,
       entryPath: daemonSidecarEntry,
       env: buildPackagedDaemonSpawnEnv(paths, {
+        launchContext: options.launchContext,
         appVersion: options.appVersion,
         amrProfile: options.amrProfile,
         daemonCliEntry: options.daemonCliEntry,
