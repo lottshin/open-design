@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { link, mkdir, readFile, readdir, unlink, writeFile } from "node:fs/promises";
+import { access, link, mkdir, readFile, readdir, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { updateStageMetricSchema, type UpdateStageMetric, parseUpdateLifecycleObservation, type UpdateLifecycleObservation } from "@open-design/contracts/analytics";
 import { isSafeInstallerObservationFlowId, type InstallerObservationHandle } from "./installer-observations.js";
@@ -97,6 +97,18 @@ export async function recordUpdateStage(
 }
 
 
+/** Every update check opens a flow; drop stage-only flows once replay can no
+ * longer use them. Installer flows (with summary.json) are left untouched. */
+async function pruneExpiredStageOnlyFlow(flowRoot: string, now: Date): Promise<boolean> {
+  try {
+    if (await access(join(flowRoot, "summary.json")).then(() => true, () => false)) return false;
+    const age = now.getTime() - (await stat(join(flowRoot, "stages"))).mtimeMs;
+    if (!(age > TTL_MS + 24 * 60 * 60 * 1000)) return false;
+    await rm(flowRoot, { recursive: true, force: true });
+    return true;
+  } catch { return false; }
+}
+
 /** Only a different desktop session can close a restart attempt. Daemon-only
  * restarts and repeated window-ready callbacks cannot infer application restart. */
 export async function recordIncomingUpdateStageResults(input: {
@@ -108,8 +120,10 @@ export async function recordIncomingUpdateStageResults(input: {
   try {
     const now = input.now?.() ?? new Date();
     let recorded = 0;
+    let pruned = 0;
     for (const entry of await readdir(input.root, { withFileTypes: true })) {
       if (!entry.isDirectory() || !isSafeInstallerObservationFlowId(entry.name)) continue;
+      if (pruned < 256 && await pruneExpiredStageOnlyFlow(join(input.root, entry.name), now)) { pruned += 1; continue; }
       try {
         const raw = JSON.parse(await readFile(join(input.root, entry.name, 'stages/restart-started.json'), 'utf8'));
         const parsed = updateStageMetricSchema.safeParse(raw);

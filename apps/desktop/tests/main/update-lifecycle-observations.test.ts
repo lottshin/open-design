@@ -72,3 +72,18 @@ it('does not fail startup when no incoming restart journal exists', async () => 
     sessionId: 'new-desktop', osVersion: null, platform: 'darwin', arch: 'arm64',
   })).resolves.toBeUndefined();
 });
+it('prunes expired stage-only check flows but keeps installer flows', async () => {
+  const { root, handle } = await fixture();
+  const { mkdir, utimes, writeFile, access } = await import('node:fs/promises');
+  const old = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000);
+  const checkOnly = join(root, 'check-only-flow');
+  await mkdir(join(checkOnly, 'stages'), { recursive: true });
+  await writeFile(join(checkOnly, 'stages', 'check-result.json'), '{}');
+  await utimes(join(checkOnly, 'stages'), old, old);
+  await mkdir(join(root, 'flow', 'stages'), { recursive: true });
+  await utimes(join(root, 'flow', 'stages'), old, old);
+  await recordIncomingUpdateStageResults({ root, namespace: 'test', channel: 'prerelease', version: '1.0.1',
+    sessionId: 'new-desktop', osVersion: null, platform: 'darwin', arch: 'arm64' });
+  await expect(access(checkOnly)).rejects.toThrow();
+  await expect(access(handle.summaryPath)).resolves.toBeUndefined();
+});
