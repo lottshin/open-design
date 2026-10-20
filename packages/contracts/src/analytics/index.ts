@@ -7,3 +7,4 @@ export * from './client-observability.js';
 export * from './run-schema-v4.js';
 export * from './update-lifecycle.js';
 export * from './client-metrics.js';
+export * from './share-observation.js';
