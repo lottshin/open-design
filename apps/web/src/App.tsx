@@ -169,7 +169,7 @@ import {
   stashHomePromptHandoff,
 } from './components/home-hero/plugin-authoring';
 import { goBack, navigate, useRoute, type Route } from './router';
-import { navigationTiming, navigationPage, usePageNavigationReady } from './observability/navigation-timing';
+import { navigationTiming, navigationPage, usePageNavigationReady, observeNavigation } from './observability/navigation-timing';
 import { useStartupReady } from './observability/startup-ready';
 import {
   fetchDaemonConfig,
@@ -2345,14 +2345,12 @@ function AppInner() {
       // the `functional` half of this gate. Reading it here as well would
       // spend a second `/api/skills` request per launch, and the first one
       // would be the headerless (fail-closed) answer.
-      void fetchDesignTemplates({ throwOnError: true }).then((list) => {
+      let templatesReady = true;
+      void fetchDesignTemplates({ onReadResult: ready => { templatesReady = ready; } }).then((list) => {
         if (cancelled) return;
+        setDesignTemplatesReady(templatesReady);
         setDesignTemplates(list);
-        setDesignTemplatesReady(true);
-      }).catch(() => {
-        if (!cancelled) setDesignTemplatesReady(false);
-      }).finally(() => {
-        if (!cancelled) markSkillRegistryReady('templates');
+        markSkillRegistryReady('templates');
       });
 
       const designSystemsContext = workspaceContextRef.current;
@@ -2373,9 +2371,8 @@ function AppInner() {
           designSystemsCatalogIdentity,
           designSystemsRequestGeneration,
         );
-        void fetchDesignSystems(designSystemsContext, { throwOnError: true })
-          .then(list => ({ list, ready: true }), () => ({ list: [], ready: false }))
-          .then(({ list, ready }) => {
+        let ready = true;
+        void fetchDesignSystems(designSystemsContext, { onReadResult: success => { ready = success; } }).then((list) => {
             if (
               cancelled ||
               workspaceContextStateRef.current.identityChangePending ||
@@ -2411,14 +2408,12 @@ function AppInner() {
         setTemplates(list);
       });
 
-      void fetchPromptTemplates({ throwOnError: true }).then((list) => {
+      let promptsReady = true;
+      void fetchPromptTemplates({ onReadResult: ready => { promptsReady = ready; } }).then((list) => {
         if (cancelled) return;
+        setPromptTemplatesReady(promptsReady);
         setPromptTemplates(list);
-        setPromptTemplatesReady(true);
-      }).catch(() => {
-        if (!cancelled) setPromptTemplatesReady(false);
-      }).finally(() => {
-        if (!cancelled) setPromptTemplatesLoading(false);
+        setPromptTemplatesLoading(false);
       });
 
       void fetchAppVersionInfo().then((info) => {
@@ -2756,8 +2751,8 @@ function AppInner() {
     const requestGeneration =
       (designSystemsRequestGenerationRef.current.get(issuedCatalogIdentity) ?? 0) + 1;
     designSystemsRequestGenerationRef.current.set(issuedCatalogIdentity, requestGeneration);
-    const { list, ready } = await fetchDesignSystems(issuedContext, { ...options, throwOnError: true })
-      .then(list => ({ list, ready: true }), () => ({ list: [], ready: false }));
+    let ready = true;
+    const list = await fetchDesignSystems(issuedContext, { ...options, onReadResult: success => { ready = success; } });
     if (
       workspaceContextStateRef.current.identityChangePending
       || designSystemsRequestGenerationRef.current.get(issuedCatalogIdentity)
@@ -2804,8 +2799,8 @@ function AppInner() {
     const requestGeneration =
       (skillsRequestGenerationRef.current.get(issuedCatalogIdentity) ?? 0) + 1;
     skillsRequestGenerationRef.current.set(issuedCatalogIdentity, requestGeneration);
-    const { list, ready } = await fetchSkills(read.context, { throwOnError: true })
-      .then(list => ({ list, ready: true }), () => ({ list: [], ready: false }));
+    let ready = true;
+    const list = await fetchSkills(read.context, { onReadResult: success => { ready = success; } });
     // A read for the workspace the user has since LEFT must not restore that
     // workspace's catalog over the current one — see `beginWorkspaceScopedRead`.
     // Skipping the gate too is deliberate: this response is not an answer about
@@ -4059,13 +4054,10 @@ function AppInner() {
     return { kind: 'resolved', name: authoritativeName };
   }, [rememberAuthoritativeProjectName]);
 
-  const projectOpenRequestRef = useRef(0);
   const openProjectForNavigation = useCallback(async (
     id: string,
     fileName?: string,
     projectTitleHint?: ProjectTitleHint,
-    navigationId?: string,
-    openingStillCurrent?: () => boolean,
   ): Promise<boolean> => {
     const routeFileName = fileName ?? null;
     const hintedProjectName = projectTitleHint?.name.trim() || null;
@@ -4124,7 +4116,6 @@ function AppInner() {
       openingContext,
     );
     const openingScopeIsCurrent = () => {
-      if (openingStillCurrent && !openingStillCurrent()) return false;
       if (currentWorkspaceAccountGeneration() !== openingAccountGeneration) return false;
       if (!pendingContextWitness) {
         return projectAuthorizationGenerationRef.current === openingAuthorizationGeneration
@@ -4145,7 +4136,6 @@ function AppInner() {
       return !requiresBoundCatalogProject;
     };
     const navigateToOpenedProject = (project: Project) => {
-      if (!openingScopeIsCurrent()) return false;
       const projectWorkspaceId = project.workspaceId?.trim() ?? '';
       projectOpenWorkspaceWitnessRef.current =
         projectWorkspaceId
@@ -4160,9 +4150,7 @@ function AppInner() {
               accountGeneration: openingAccountGeneration,
             }
           : null;
-      navigate({ kind: 'project', projectId: id, fileName: routeFileName }, {
-        onCancel: reason => { if (navigationId) navigationTiming.finish(navigationId, 'cancelled', reason); },
-      });
+      navigate({ kind: 'project', projectId: id, fileName: routeFileName });
       return true;
     };
     const rememberHintAuthority = () => {
@@ -4302,30 +4290,27 @@ function AppInner() {
     projectTitleHint?: ProjectTitleHint,
   ): Promise<boolean> => {
     const source = routeRef.current;
-    const request = ++projectOpenRequestRef.current;
-    // Business request lifetime is independent of best-effort telemetry.
-    const openingStillCurrent = () => projectOpenRequestRef.current === request && routeRef.current === source;
     // Clicking an already-open project/file is not another project entry.
     if (source.kind === 'project' && source.projectId === id) {
-      navigationTiming.cancel('superseded');
+      observeNavigation(() => navigationTiming.cancel('superseded'));
       return openProjectForNavigation(id, fileName, projectTitleHint);
     }
     const openingAccountGeneration = currentWorkspaceAccountGeneration();
     const openingAuthorizationGeneration = projectAuthorizationGenerationRef.current;
-    const navigationId = navigationTiming.begin(source, { projectId: id });
+    const navigationId = observeNavigation(() => navigationTiming.begin(source, { projectId: id }));
     try {
-      const opened = await openProjectForNavigation(id, fileName, projectTitleHint, navigationId, openingStillCurrent);
+      const opened = await openProjectForNavigation(id, fileName, projectTitleHint);
       if (!opened) {
         if (currentWorkspaceAccountGeneration() !== openingAccountGeneration
           || projectAuthorizationGenerationRef.current !== openingAuthorizationGeneration) {
-          navigationTiming.finish(navigationId, 'cancelled', 'scope_changed');
+          if (navigationId) observeNavigation(() => navigationTiming.finish(navigationId, 'cancelled', 'scope_changed'));
         } else {
-          navigationTiming.finish(navigationId, 'failed', 'open_unavailable');
+          if (navigationId) observeNavigation(() => navigationTiming.finish(navigationId, 'failed', 'open_unavailable'));
         }
       }
       return opened;
     } catch (error) {
-      navigationTiming.finish(navigationId, 'failed', 'open_unavailable');
+      if (navigationId) observeNavigation(() => navigationTiming.finish(navigationId, 'failed', 'open_unavailable'));
       throw error;
     }
   }, [openProjectForNavigation]);
@@ -4672,10 +4657,7 @@ function AppInner() {
   const handleSkillsChanged = useCallback(
     (affectedSkillId?: string) => {
       void refreshSkills();
-      void fetchDesignTemplates({ throwOnError: true }).then((list) => {
-        setDesignTemplates(list);
-        setDesignTemplatesReady(true);
-      }).catch(() => setDesignTemplatesReady(false));
+      void fetchDesignTemplates({ onReadResult: setDesignTemplatesReady }).then((list) => setDesignTemplates(list));
       iframeKeepAlivePool.evictMatching(
         (entry) => {
           const proj = projectsRef.current.find((p) => p.id === entry.projectId);

@@ -123,10 +123,7 @@ vi.mock('../../src/i18n', () => ({
   useT: () => (key: string) => key,
 }));
 
-vi.mock('../../src/router', () => ({
-  // Real navigate commits synchronously via onCommit; ProjectView switches there.
-  navigate: vi.fn((_route: unknown, opts?: { onCommit?: () => void }) => opts?.onCommit?.()),
-}));
+vi.mock('../../src/router', () => ({ navigate: vi.fn() }));
 
 vi.mock('../../src/providers/anthropic', () => ({ streamMessage: vi.fn() }));
 

@@ -61,12 +61,6 @@ describe('app version helpers', () => {
     expect(isPackagedRuntime({ execPath: '/usr/local/bin/node', platform: 'linux' })).toBe(false);
   });
 
-  it.each(['/opt/hostedtoolcache/node/24.19.0/x64/bin/node', '/opt/node/bin/node', '/usr/share/node/bin/node'])(
-    'does not classify a normal Linux Node installation as packaged: %s', (execPath) => {
-      expect(isPackagedRuntime({ execPath, platform: 'linux', resourcesPath: '' })).toBe(false);
-    },
-  );
-
   it('honors an explicit release channel', () => {
     expect(resolveAppVersionInfo({
       packageMetadata: { version: '1.2.3' },
@@ -90,13 +84,5 @@ describe('app version helpers', () => {
       packageMetadata: { version: '0.8.0-preview.1' },
       env: {},
     }).channel).toBe('preview');
-  });
-});
-
-describe('telemetry version fallback', () => {
-  it('does not let an injected placeholder hide the real package version', () => {
-    expect(resolveAppVersionInfo({
-      env: { OD_APP_VERSION: '0.0.0' }, packageMetadata: { version: '1.2.3' },
-    }).version).toBe('1.2.3');
   });
 });

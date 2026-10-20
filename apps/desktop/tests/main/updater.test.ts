@@ -4048,3 +4048,40 @@ it('keeps a downloaded release on its original flow after a polling check', asyn
     });
   } finally { await fixture.close(); rmSync(root, { recursive: true, force: true }); }
 });
+
+it.each([false, true])('preserves update actions and state transitions when observation storage fails (autoOpen=%s)', async autoOpen => {
+  const fixture = await createUpdaterFixture();
+  const roots: string[] = [];
+  try {
+    const outcomes = [];
+    for (const observation of ['disabled', 'writable', 'unwritable'] as const) {
+      const root = makeRoot();
+      roots.push(root);
+      const observationRoot = join(root, 'observations');
+      if (observation === 'unwritable') await writeFile(observationRoot, 'not a directory');
+      const actions: string[] = [];
+      const updater = createDesktopUpdater({
+        arch: 'arm64', downloadRoot: join(root, 'updates'),
+        env: { ...updaterEnv(fixture.metadataUrl), [DESKTOP_UPDATE_ENV.OPEN_DRY_RUN]: '0', [DESKTOP_UPDATE_ENV.AUTO_OPEN]: autoOpen ? '1' : '0' },
+        ...(observation === 'disabled' ? {} : { installerObservationRoot: observationRoot }),
+        namespace: 'release', source: SIDECAR_SOURCES.TOOLS_PACK,
+      }, {
+        fetch: async (url, init) => { actions.push(new URL(String(url)).pathname); return await fetch(url, init); },
+        launchInstallerAfterQuit: async () => { actions.push('open-installer'); return ''; },
+      });
+      const states: string[] = [];
+      updater.subscribe(() => states.push(updater.snapshot().state));
+      const checked = await updater.checkForUpdates();
+      if (!autoOpen) await updater.installUpdate();
+      expect(checked.error).toBeUndefined();
+      expect(updater.snapshot().error).toBeUndefined();
+      expect(actions.filter(action => action === 'open-installer')).toHaveLength(1);
+      outcomes.push({ actions, states, state: updater.snapshot().state, installed: updater.snapshot().installResult != null });
+    }
+    expect(outcomes[1]).toEqual(outcomes[0]);
+    expect(outcomes[2]).toEqual(outcomes[0]);
+  } finally {
+    await fixture.close();
+    for (const root of roots) rmSync(root, { recursive: true, force: true });
+  }
+});

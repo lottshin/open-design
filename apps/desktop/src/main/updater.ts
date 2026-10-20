@@ -449,52 +449,42 @@ export function createDesktopUpdater(
   const recordedStages = new Set<string>();
 
   function beginMetricFlow(trigger: UpdateStageMetric['trigger']): void {
-    metricTrigger = trigger;
-    recordedStages.clear();
-    metricFlowFailed = false;
-    metricHandle = config.openDryRun || config.installerObservationRoot == null || config.namespace == null
-      ? null : { flowId: randomUUID(), summaryPath: '' };
-    if (metricHandle != null) metricHandle.summaryPath = installerObservationSummaryPath(config.installerObservationRoot!, metricHandle.flowId);
+    try {
+      metricTrigger = trigger;
+      recordedStages.clear();
+      metricFlowFailed = false;
+      metricHandle = config.openDryRun || config.installerObservationRoot == null || config.namespace == null
+        ? null : { flowId: randomUUID(), summaryPath: '' };
+      if (metricHandle != null) metricHandle.summaryPath = installerObservationSummaryPath(config.installerObservationRoot!, metricHandle.flowId);
+    } catch { /* Observation must not affect update decisions. */ }
   }
 
   function metric(stage: UpdateStageMetric['stage'], result: UpdateStageMetric['result'], reason: UpdateStageMetric['reason_code'] = null): void {
-    const handle = metricHandle;
-    const key = `${stage}:${result === 'started' ? 'started' : 'result'}`;
-    if (handle == null || recordedStages.has(key) || pendingJournalWrites >= 32) return;
-    recordedStages.add(key);
-    if (result === 'failed' || result === 'cancelled') metricFlowFailed = true;
-    const checking = stage === 'check' && result !== 'success';
-    const release = stage === 'install_verify' || stage === 'install_open' || stage === 'restart'
-      ? activeRelease?.ref : candidate ?? activeRelease?.ref;
-    const artifact = checking ? null : installerObservationArtifactType(release?.artifact.type);
-    const event: UpdateStageMetric = { flow_id: handle.flowId, stage, result, reason_code: reason,
-      from_version: config.currentVersion, to_version: checking ? null : release?.version ?? null,
-      update_path: artifact == null ? null : artifact === 'payload' ? 'payload' : 'installer',
-      artifact_type: artifact, trigger: metricTrigger, duration_ms: null };
-    const context = { namespace: config.namespace!, sessionId: metricSessionId, channel: config.channel,
-      platform: config.platform, arch: config.arch, occurredAt: now().toISOString() };
-    pendingJournalWrites += 1;
-    // At most 32 pending writes; never await telemetry on the update/interaction path.
-    journalQueue = journalQueue.then(async () => {
-      await recordUpdateStage(handle, event, { ...context, osVersion: deps.osVersion ?? null });
-    }).catch(() => undefined)
-      .finally(() => { pendingJournalWrites -= 1; });
+    try {
+      const handle = metricHandle;
+      const key = `${stage}:${result === 'started' ? 'started' : 'result'}`;
+      if (handle == null || recordedStages.has(key) || pendingJournalWrites >= 32) return;
+      recordedStages.add(key);
+      if (result === 'failed' || result === 'cancelled') metricFlowFailed = true;
+      const checking = stage === 'check' && result !== 'success';
+      const release = stage === 'install_verify' || stage === 'install_open' || stage === 'restart'
+        ? activeRelease?.ref : candidate ?? activeRelease?.ref;
+      const artifact = checking ? null : installerObservationArtifactType(release?.artifact.type);
+      const event: UpdateStageMetric = { flow_id: handle.flowId, stage, result, reason_code: reason,
+        from_version: config.currentVersion, to_version: checking ? null : release?.version ?? null,
+        update_path: artifact == null ? null : artifact === 'payload' ? 'payload' : 'installer',
+        artifact_type: artifact, trigger: metricTrigger, duration_ms: null };
+      const context = { namespace: config.namespace!, sessionId: metricSessionId, channel: config.channel,
+        platform: config.platform, arch: config.arch, occurredAt: now().toISOString() };
+      pendingJournalWrites += 1;
+      // At most 32 pending writes; never await telemetry on the update/interaction path.
+      journalQueue = journalQueue.then(async () => {
+        await recordUpdateStage(handle, event, { ...context, osVersion: deps.osVersion ?? null });
+      }).catch(() => undefined)
+        .finally(() => { pendingJournalWrites -= 1; });
+    } catch { /* Observation must not affect update decisions. */ }
   }
 
-  async function observedStage(stage: UpdateStageMetric['stage'], run: () => Promise<DesktopUpdateStatusSnapshot>): Promise<DesktopUpdateStatusSnapshot> {
-    metric(stage, 'started');
-    try {
-      const result = await run();
-      const failed = result.error != null || result.state === DESKTOP_UPDATE_STATES.ERROR;
-      metric(stage, failed ? 'failed' : 'success', failed
-        ? stage === 'check' ? 'check_failed' : stage === 'download' ? 'download_failed' : 'install_open_failed' : null);
-      return result;
-    } catch (error) {
-      metric(stage, error instanceof Error && error.name === 'AbortError' ? 'cancelled' : 'failed',
-        error instanceof Error && error.name === 'AbortError' ? 'cancelled' : 'operation_failed');
-      throw error;
-    }
-  }
 
   let lifecycleSummary: DesktopUpdateCacheLifecycleSummary | undefined;
   let progress: DesktopUpdateProgressSnapshot | undefined;
@@ -795,28 +785,6 @@ export function createDesktopUpdater(
   }
 
   async function checkForCandidate(options: ActionOptions = {}): Promise<DesktopUpdateStatusSnapshot> {
-    if (!supported() || installFrozen || installResult != null) return await checkForCandidateRaw();
-    const previous = metricHandle != null && !metricFlowFailed ? {
-      handle: metricHandle, trigger: metricTrigger, stages: [...recordedStages],
-      version: activeRelease?.ref.version ?? candidate?.version,
-    } : null;
-    beginMetricFlow(options.trigger ?? 'manual');
-    const checked = await observedStage('check', checkForCandidateRaw);
-    // A polling check gets its own denominator, but must not detach an already
-    // downloaded/available release from the flow that produced it.
-    if (previous?.version != null && checked.error == null &&
-        previous.version === (candidate?.version ?? activeRelease?.ref.version)) {
-      metricHandle = previous.handle;
-      metricTrigger = previous.trigger;
-      recordedStages.clear();
-      for (const stage of previous.stages) recordedStages.add(stage);
-      metricFlowFailed = false;
-    }
-    if (checked.error == null && (options.autoDownload ?? config.autoDownload) && candidate != null) return await downloadUpdate();
-    return checked;
-  }
-
-  async function checkForCandidateRaw(): Promise<DesktopUpdateStatusSnapshot> {
     const unsupported = unsupportedStatus();
     if (unsupported != null) return unsupported;
     if (installFrozen || installResult != null) return snapshot();
@@ -825,6 +793,23 @@ export function createDesktopUpdater(
       if (restored?.state === DESKTOP_UPDATE_STATES.ERROR) return restored;
       if (installFrozen || installResult != null) return snapshot();
     }
+    const previous = metricHandle != null && !metricFlowFailed ? {
+      handle: metricHandle, trigger: metricTrigger, stages: [...recordedStages],
+      version: activeRelease?.ref.version ?? candidate?.version,
+    } : null;
+    beginMetricFlow(options.trigger ?? 'manual');
+    metric('check', 'started');
+    const observeCheck = (result: DesktopUpdateStatusSnapshot): DesktopUpdateStatusSnapshot => {
+      metric('check', result.error ? 'failed' : 'success', result.error ? 'check_failed' : null);
+      if (previous?.version != null && result.error == null &&
+          previous.version === (candidate?.version ?? activeRelease?.ref.version)) {
+        metricHandle = previous.handle; metricTrigger = previous.trigger;
+        recordedStages.clear();
+        for (const stage of previous.stages) recordedStages.add(stage);
+        metricFlowFailed = false;
+      }
+      return result;
+    };
     const keepDownloadedVisible = activeRelease != null;
     if (!keepDownloadedVisible) setState(DESKTOP_UPDATE_STATES.CHECKING);
     try {
@@ -853,9 +838,9 @@ export function createDesktopUpdater(
       }
       const selected = selectUpdateCandidateWithFallback(body, config, launcherPayloadContextValid && reinstallRequirement == null);
       if (!selected.ok) {
-        return selected.state === DESKTOP_UPDATE_STATES.ERROR
+        return observeCheck(selected.state === DESKTOP_UPDATE_STATES.ERROR
           ? setFailurePreservingActive(selected.error)
-          : setState(selected.state, selected.error);
+          : setState(selected.state, selected.error));
       }
       // Same-version installer reinstall (disaster posture): when the installed
       // outer is below min, the installer must be offered even with no newer
@@ -872,7 +857,7 @@ export function createDesktopUpdater(
         candidate = null;
         if (activeRelease != null) {
           metadata = activeRelease.ref.metadata;
-          return setState(DESKTOP_UPDATE_STATES.DOWNLOADED);
+          return observeCheck(setState(DESKTOP_UPDATE_STATES.DOWNLOADED));
         }
         activeRelease = null;
         await writeMetadataPatch((current) => ({
@@ -881,7 +866,7 @@ export function createDesktopUpdater(
           incoming: undefined,
           lastCheckedAt,
         }));
-        return setState(DESKTOP_UPDATE_STATES.NOT_AVAILABLE);
+        return observeCheck(setState(DESKTOP_UPDATE_STATES.NOT_AVAILABLE));
       }
       if (activeRelease != null && releaseMatchesCandidate(activeRelease.ref, selected.candidate)) {
         logUpdateEvent("check-already-downloaded", {
@@ -891,8 +876,8 @@ export function createDesktopUpdater(
         candidate = selected.candidate;
         metadata = selected.candidate.metadata;
         const prepareError = await preparePayloadReleaseForReady(activeRelease);
-        if (prepareError != null) return prepareError;
-        return setState(DESKTOP_UPDATE_STATES.DOWNLOADED);
+        if (prepareError != null) return observeCheck(prepareError);
+        return observeCheck(setState(DESKTOP_UPDATE_STATES.DOWNLOADED));
       }
       const openedForAdoption = await openStore();
       if (openedForAdoption.ok) {
@@ -903,7 +888,7 @@ export function createDesktopUpdater(
             version: adoptedRelease.ref.version,
           });
           const prepareError = await preparePayloadReleaseForReady(adoptedRelease);
-          if (prepareError != null) return prepareError;
+          if (prepareError != null) return observeCheck(prepareError);
           candidate = selected.candidate;
           activeRelease = adoptedRelease;
           metadata = adoptedRelease.ref.metadata;
@@ -920,7 +905,7 @@ export function createDesktopUpdater(
             lastCheckedAt,
             version: STORE_METADATA_VERSION,
           });
-          return setState(DESKTOP_UPDATE_STATES.DOWNLOADED);
+          return observeCheck(setState(DESKTOP_UPDATE_STATES.DOWNLOADED));
         }
       }
       candidate = selected.candidate;
@@ -932,9 +917,12 @@ export function createDesktopUpdater(
       const available = activeRelease == null
         ? setState(DESKTOP_UPDATE_STATES.AVAILABLE)
         : setState(DESKTOP_UPDATE_STATES.DOWNLOADED);
+      observeCheck(available);
+      if (options.autoDownload ?? config.autoDownload) return await downloadUpdate();
       return available;
     } catch (checkError) {
-      if (checkError instanceof Error && checkError.name === 'AbortError') metric('check', 'cancelled', 'cancelled');
+      metric('check', checkError instanceof Error && checkError.name === 'AbortError' ? 'cancelled' : 'failed',
+        checkError instanceof Error && checkError.name === 'AbortError' ? 'cancelled' : 'check_failed');
       return setFailurePreservingActive(
         createError("metadata-unreachable", checkError instanceof Error ? checkError.message : String(checkError)),
       );
@@ -942,20 +930,6 @@ export function createDesktopUpdater(
   }
 
   async function downloadUpdate(): Promise<DesktopUpdateStatusSnapshot> {
-    if (!supported()) return await downloadUpdateRaw();
-    if (installFrozen || installResult != null) return snapshot();
-    if (candidate == null) {
-      const checked = await checkForCandidate({ autoDownload: false });
-      if (candidate == null || checked.error != null) return checked;
-    }
-    if (activeRelease != null && releaseMatchesCandidate(activeRelease.ref, candidate)) return snapshot();
-    if (metricHandle == null || recordedStages.has('download:result')) beginMetricFlow(metricTrigger);
-    const downloaded = await observedStage('download', downloadUpdateRaw);
-    if (config.autoOpen && downloaded.error == null && activeRelease != null) return await installUpdate({ trigger: 'silent' });
-    return downloaded;
-  }
-
-  async function downloadUpdateRaw(): Promise<DesktopUpdateStatusSnapshot> {
     const unsupported = unsupportedStatus();
     if (unsupported != null) return unsupported;
     if (installFrozen || installResult != null) return snapshot();
@@ -966,8 +940,10 @@ export function createDesktopUpdater(
     if (activeRelease != null && releaseMatchesCandidate(activeRelease.ref, candidate)) {
       return setState(DESKTOP_UPDATE_STATES.DOWNLOADED);
     }
+    if (metricHandle == null || recordedStages.has('download:result')) beginMetricFlow(metricTrigger);
+    metric('download', 'started');
     const opened = await openStore();
-    if (!opened.ok) return opened.status;
+    if (!opened.ok) { metric('download', 'failed', 'download_failed'); return opened.status; }
     const nextCandidate = candidate;
     const outputName = artifactFileName(nextCandidate);
     const cycleId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
@@ -996,6 +972,7 @@ export function createDesktopUpdater(
     let tmpPath: string | null = null;
     let stagingDir: string | null = null;
     const failDownload = async (nextError: DesktopUpdateErrorSnapshot): Promise<DesktopUpdateStatusSnapshot> => {
+      metric('download', 'failed', 'download_failed');
       if (stagingDir != null) await rm(stagingDir, { force: true, recursive: true }).catch(() => undefined);
       incomingRelease = null;
       progress = undefined;
@@ -1141,9 +1118,12 @@ export function createDesktopUpdater(
         });
       }
       const downloaded = setState(DESKTOP_UPDATE_STATES.DOWNLOADED);
+      metric('download', 'success');
+      if (config.autoOpen) return await installUpdate({ trigger: 'silent' });
       return downloaded;
     } catch (downloadError) {
-      if (downloadError instanceof Error && downloadError.name === 'AbortError') metric('download', 'cancelled', 'cancelled');
+      metric('download', downloadError instanceof Error && downloadError.name === 'AbortError' ? 'cancelled' : 'failed',
+        downloadError instanceof Error && downloadError.name === 'AbortError' ? 'cancelled' : 'download_failed');
       if (stagingDir != null) await rm(stagingDir, { force: true, recursive: true }).catch(() => undefined);
       incomingRelease = null;
       progress = undefined;
@@ -1153,6 +1133,7 @@ export function createDesktopUpdater(
   }
 
   async function writeInstallObservation(attemptedAt: string): Promise<InstallerObservationHandle | null> {
+    observationHandle = null;
     if (config.openDryRun) return null;
     if (config.installerObservationRoot == null || config.namespace == null) return null;
     if (activeRelease == null) return null;
@@ -1230,14 +1211,6 @@ export function createDesktopUpdater(
   }
 
   async function installUpdate(options: ActionOptions = {}): Promise<DesktopUpdateStatusSnapshot> {
-    if (!supported()) return await installUpdateRaw();
-    if (installResult != null) return snapshot();
-    if (metricHandle == null || metricFlowFailed || recordedStages.has('install_open:result')) beginMetricFlow(options.trigger ?? 'manual');
-    metricTrigger = options.trigger ?? 'manual';
-    return await installUpdateRaw();
-  }
-
-  async function installUpdateRaw(): Promise<DesktopUpdateStatusSnapshot> {
     const unsupported = unsupportedStatus();
     if (unsupported != null) return unsupported;
     if (installResult != null) {
@@ -1256,6 +1229,8 @@ export function createDesktopUpdater(
     if (!containsPath(opened.root.realRoot, resolvedDownload)) {
       return setState(DESKTOP_UPDATE_STATES.ERROR, createError("download-path-escaped", "download path is outside the update root"));
     }
+    if (metricHandle == null || metricFlowFailed || recordedStages.has('install_open:result')) beginMetricFlow(options.trigger ?? 'manual');
+    metricTrigger = options.trigger ?? 'manual';
     setState(DESKTOP_UPDATE_STATES.INSTALLING);
     metric('install_verify', 'started');
     const installChecksum = activeRelease.ref.checksum;

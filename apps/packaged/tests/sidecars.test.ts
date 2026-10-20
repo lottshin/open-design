@@ -1317,10 +1317,10 @@ it.skipIf(process.platform === 'win32')('observes a real running child killed wi
 });
 
 
-it('marks daemon shutdown before closeManagedChild requests even a forced stop', async () => {
+it('marks forced shutdown and closes without waiting for an unresolved observation', async () => {
   const root = mkdtempSync(join(tmpdir(), 'od-intentional-close-'));
   const child = Object.assign(new EventEmitter(), { exitCode: null, signalCode: null });
-  const report = vi.fn(async () => {});
+  const report = vi.fn(() => new Promise<void>(() => {}));
   const observer = observeDaemonExit(child, report); observer.markReady();
   try {
     await closeManagedChild({ app: APP_KEYS.DAEMON, child, daemonExitObserver: observer,

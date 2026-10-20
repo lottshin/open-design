@@ -1,4 +1,3 @@
-import { LIVE_PREVIEW_OBSERVER_HASH } from './preview-metrics.js';
 import type { Response } from 'express';
 import { ConnectorServiceError } from '../connectors/service.js';
 import { sendApiError } from '../http/api-errors.js';
@@ -53,7 +52,7 @@ export function setLiveArtifactPreviewHeaders(res: Response): void {
     [
       "default-src 'none'",
       "base-uri 'none'",
-      `script-src '${LIVE_PREVIEW_OBSERVER_HASH}'`,
+      "script-src 'none'",
       "object-src 'none'",
       "connect-src 'none'",
       "form-action 'none'",
@@ -61,7 +60,7 @@ export function setLiveArtifactPreviewHeaders(res: Response): void {
       "img-src 'self' data: blob:",
       "font-src 'self' data:",
       "style-src 'unsafe-inline'",
-      'sandbox allow-scripts',
+      'sandbox allow-same-origin',
     ].join('; '),
   );
 }

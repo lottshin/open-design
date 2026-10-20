@@ -46,6 +46,8 @@ async function flushMicrotasks() {
   });
 }
 
+import { navigationTiming } from '../src/observability/navigation-timing';
+
 describe('navigate / useRoute timing', () => {
   let consoleError: ReturnType<typeof vi.spyOn>;
 
@@ -58,6 +60,17 @@ describe('navigate / useRoute timing', () => {
     cleanup();
     consoleError.mockRestore();
     window.history.replaceState(null, '', '/');
+  });
+
+  it.each(['beginPage', 'commit'] as const)('commits navigation and the business callback when observation %s throws', async method => {
+    const spy = vi.spyOn(navigationTiming, method).mockImplementation(() => { throw new Error('observer failed'); });
+    const onCommit = vi.fn();
+    try {
+      expect(() => navigate({ kind: 'home', view: 'onboarding' }, { onCommit })).not.toThrow();
+      expect(window.location.pathname).toBe('/onboarding');
+      expect(onCommit).toHaveBeenCalledOnce();
+      await flushMicrotasks();
+    } finally { spy.mockRestore(); navigationTiming.cancel('page_exit'); }
   });
 
   it('updates history synchronously and notifies listeners after the microtask boundary', async () => {
@@ -365,7 +378,7 @@ describe('navigation cancellation callbacks', () => {
     try {
       navigate({ kind: 'project', projectId: 'a', fileName: null }, { onCancel: first });
       navigate({ kind: 'home', view: 'home' }, { onCancel: second });
-      expect(first).toHaveBeenCalledExactlyOnceWith('superseded');
+      expect(first).not.toHaveBeenCalled();
       gate.resolve(true);
       await flushMicrotasks();
       expect(first).toHaveBeenCalledExactlyOnceWith('superseded');

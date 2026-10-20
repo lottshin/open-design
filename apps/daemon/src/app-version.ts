@@ -45,7 +45,6 @@ interface PackageMetadata {
 export interface ResolveAppVersionInfoOptions {
   env?: NodeJS.ProcessEnv | undefined;
   packageMetadata?: PackageMetadata | null;
-  packagedRuntime?: boolean | undefined;
   resourcesPath?: string | undefined;
   execPath?: string | undefined;
   platform?: NodeJS.Platform | undefined;
@@ -118,7 +117,9 @@ export function isPackagedRuntime({
     case 'win32':
       return normalizedExecPath.includes('/resources/') || normalizedExecPath.includes('/app.asar');
     case 'linux':
-      return normalizedExecPath.includes('/resources/') || normalizedExecPath.includes('/app.asar');
+      return normalizedExecPath.includes('/usr/share/')
+        || normalizedExecPath.includes('/opt/')
+        || normalizedExecPath.includes('/resources/');
     default:
       return normalizedExecPath.includes('/resources/') || normalizedExecPath.includes('/app.asar');
   }
@@ -126,17 +127,15 @@ export function isPackagedRuntime({
 
 export function resolveAppVersionInfo({
   env = process.env,
-  packagedRuntime,
   packageMetadata,
   resourcesPath,
   execPath,
   platform = process.platform,
   arch = process.arch,
 }: ResolveAppVersionInfoOptions = {}): AppVersionInfo {
-  const packaged = normalizeTelemetryAppVersion(env.OD_APP_VERSION) !== null
-    || (packagedRuntime ?? isPackagedRuntime({ resourcesPath, execPath, platform }));
-  const version = normalizeTelemetryAppVersion(env.OD_APP_VERSION)
-    ?? normalizeTelemetryAppVersion(packageMetadata?.version)
+  const packaged = isPackagedRuntime({ resourcesPath, execPath, platform });
+  const version = cleanString(env.OD_APP_VERSION)
+    ?? cleanString(packageMetadata?.version)
     ?? APP_VERSION_FALLBACK;
   const inferredChannel = inferReleaseChannelFromVersion(version);
   const channel = cleanString(env.OD_RELEASE_CHANNEL)
@@ -159,7 +158,6 @@ async function readPackageMetadata(packageJsonUrl: URL): Promise<PackageMetadata
 
 export async function readCurrentAppVersionInfo({
   packageJsonUrl,
-  packagedRuntime,
   packageMetadata,
   env,
   resourcesPath,
@@ -170,5 +168,5 @@ export async function readCurrentAppVersionInfo({
   const resolvedUrl = packageJsonUrl ?? await findNearestPackageJsonUrl(new URL(import.meta.url));
   const metadata = packageMetadata
     ?? (resolvedUrl ? await readPackageMetadata(resolvedUrl) : null);
-  return resolveAppVersionInfo({ env, packagedRuntime, packageMetadata: metadata, resourcesPath, execPath, platform, arch });
+  return resolveAppVersionInfo({ env, packageMetadata: metadata, resourcesPath, execPath, platform, arch });
 }

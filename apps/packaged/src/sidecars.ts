@@ -876,7 +876,6 @@ export async function closeManagedChild(child: ManagedSidecarChild, observe?: (e
     }
     await appendLifecycleLog(`[open-design packaged] exited app=${child.app} pid=${child.child.pid ?? "unknown"} code=${child.child.exitCode ?? "unknown"} signal=${child.child.signalCode ?? "none"}`);
   } finally {
-    await child.daemonExitObserver?.flush();
     await child.logHandle.close().catch(() => undefined);
   }
 }
@@ -1050,7 +1049,7 @@ export async function startPackagedSidecars(
       { child: daemon.child, logPath: logPathFor(paths, APP_KEYS.DAEMON) },
     );
     if (daemonStatus.url == null) throw new Error("daemon did not report a URL");
-    if (!daemon.daemonExitObserver.markReady()) throw new Error("daemon exited before ready status could be promoted");
+    daemon.daemonExitObserver.markReady();
     options.onPhase?.("daemon-ready");
 
     // The web payload must be in the page cache before the web sidecar

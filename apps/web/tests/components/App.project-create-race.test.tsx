@@ -1044,7 +1044,7 @@ describe('App project creation routing', () => {
         workspaceId: context.workspaceId,
         workspaceMemberId: context.workspaceMemberId,
       }),
-      { forceTeamMaterialization: true, throwOnError: true },
+      { forceTeamMaterialization: true, onReadResult: expect.any(Function) },
     );
     expect(mockedFetchSkills).toHaveBeenCalledTimes(1);
 
@@ -2500,7 +2500,7 @@ describe('App project creation routing', () => {
     expect(screen.queryByTestId('project-view')).toBeNull();
   });
 
-  it('starts navigation timing before project lookup and cancels when the user leaves', async () => {
+  it('records leaving during project lookup without cancelling the original open operation', async () => {
     const lookup = deferred<Awaited<ReturnType<typeof getProject>>>();
     mockedListProjects.mockResolvedValue([]);
     mockedGetProject.mockReturnValue(lookup.promise);
@@ -2514,7 +2514,7 @@ describe('App project creation routing', () => {
     act(() => navigate({ kind: 'home', view: 'settings' }));
     await waitFor(() => expect(navigationTiming.getSnapshot()).toBeNull());
     await act(async () => { lookup.resolve(freshProject); });
-    expect(window.location.pathname).toBe('/settings');
+    expect(window.location.pathname).toBe('/projects/project-missing');
     const events = vi.mocked(reportSafetyEvent).mock.calls
       .filter(([name]) => name === 'client_navigation_result').map(([, props]) => props);
     // The settings route is measured as its own page switch; assert only the project attempt.
@@ -2534,7 +2534,7 @@ describe('App project creation routing', () => {
     await waitFor(() => expect(window.location.pathname).toBe('/projects/project-missing'));
   });
 
-  it('gives repeated project clicks new ids and prevents the superseded lookup from navigating', async () => {
+  it('gives repeated project clicks new ids without suppressing an earlier lookup', async () => {
     const firstLookup = deferred<Awaited<ReturnType<typeof getProject>>>();
     mockedListProjects.mockResolvedValue([]);
     mockedGetProject.mockReturnValueOnce(firstLookup.promise).mockResolvedValueOnce(null);
@@ -2547,7 +2547,7 @@ describe('App project creation routing', () => {
     await waitFor(() => expect(mockedGetProject).toHaveBeenCalledTimes(2));
     await screen.findByRole('alert');
     await act(async () => { firstLookup.resolve({ ...freshProject, id: 'project-missing' }); });
-    expect(window.location.pathname).toBe('/');
+    expect(window.location.pathname).toBe('/projects/project-missing');
     const events = vi.mocked(reportSafetyEvent).mock.calls
       .filter(([name]) => name === 'client_navigation_result').map(([, props]) => props);
     expect(events.map((event) => event?.status)).toEqual(['started', 'cancelled', 'started', 'failed']);

@@ -150,6 +150,11 @@ export function createNavigationTiming(deps: {
   };
 }
 
+/** Observation failures never escape into a business handler or route commit. */
+export function observeNavigation<T>(observe: () => T): T | undefined {
+  try { return observe(); } catch { return undefined; }
+}
+
 export const navigationTiming = createNavigationTiming({
   now: () => performance.now(),
   // randomUUID is secure-context-only; LAN HTTP web clients still need to

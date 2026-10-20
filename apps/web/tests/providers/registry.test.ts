@@ -53,39 +53,35 @@ import {
   writeProjectTextFileDetailed,
 } from '../../src/providers/registry';
 
-describe('required startup catalog reads', () => {
+describe('passive startup catalog observation', () => {
   afterEach(() => { vi.unstubAllGlobals(); });
-
   const readers = [
-    () => fetchSkills(null, { throwOnError: true }),
-    () => fetchDesignTemplates({ throwOnError: true }),
-    () => fetchDesignSystems(null, { throwOnError: true }),
-    () => fetchPromptTemplates({ throwOnError: true }),
+    (onReadResult: (success: boolean) => void) => fetchSkills(null, { onReadResult }),
+    (onReadResult: (success: boolean) => void) => fetchDesignTemplates({ onReadResult }),
+    (onReadResult: (success: boolean) => void) => fetchDesignSystems(null, { onReadResult }),
+    (onReadResult: (success: boolean) => void) => fetchPromptTemplates({ onReadResult }),
   ];
-
   it.each(readers.map((read, index) => ({ read, index })))(
-    'distinguishes failed requests from successful empty catalog $index', async ({ read }) => {
-      vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 503 })));
-      await expect(read()).rejects.toThrow();
-      vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('offline'); }));
-      await expect(read()).rejects.toThrow();
-      vi.stubGlobal('fetch', vi.fn(async () => new Response('{')));
-      await expect(read()).rejects.toThrow();
-      vi.stubGlobal('fetch', vi.fn(async () => Response.json({})));
-      await expect(read()).rejects.toThrow();
+    'observes failures without changing the existing empty-list result $index', async ({ read }) => {
+      for (const fetcher of [
+        async () => new Response('', { status: 503 }),
+        async () => { throw new Error('offline'); },
+        async () => new Response('{'),
+      ]) {
+        const observer = vi.fn();
+        vi.stubGlobal('fetch', vi.fn(fetcher));
+        await expect(read(observer)).resolves.toEqual([]);
+        expect(observer).toHaveBeenLastCalledWith(false);
+      }
+      const observer = vi.fn();
       vi.stubGlobal('fetch', vi.fn(async () => Response.json({
         skills: [], designTemplates: [], designSystems: [], promptTemplates: [],
       })));
-      await expect(read()).resolves.toEqual([]);
+      await expect(read(observer)).resolves.toEqual([]);
+      expect(observer).toHaveBeenLastCalledWith(true);
+      await expect(read(() => { throw new Error('observation failed'); })).resolves.toEqual([]);
     },
   );
-
-  it('keeps the existing empty-list fallback for callers without strict reads', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 503 })));
-    await expect(Promise.all([
-      fetchSkills(), fetchDesignTemplates(), fetchDesignSystems(), fetchPromptTemplates(),
-    ])).resolves.toEqual([[], [], [], []]);
-  });
 });
 
 describe('explicit comment pull in the UI provider', () => {
@@ -460,7 +456,7 @@ describe('design-system Workspace scope', () => {
     });
   });
 
-  it.each([false, true])('keeps personal and official systems available when team materialization fails (strict=%s)', async (throwOnError) => {
+  it.each([false, true])('keeps personal and official systems available when team materialization fails (observed=%s)', async (observed) => {
     const context = {
       ...teamWorkspaceContext(),
       workspaceId: 'ws-team-offline',
@@ -485,10 +481,10 @@ describe('design-system Workspace scope', () => {
     });
     vi.stubGlobal('fetch', fetchMock);
 
-    await expect(fetchDesignSystems(context, { throwOnError })).resolves.toMatchObject([
+    await expect(fetchDesignSystems(context, observed ? { onReadResult: vi.fn() } : undefined)).resolves.toMatchObject([
       expect.objectContaining({ id: 'user:local-brand' }),
     ]);
-    await expect(fetchDesignSystemsResult(context, { throwOnError })).resolves.toMatchObject({
+    await expect(fetchDesignSystemsResult(context)).resolves.toMatchObject({
       ok: true,
       designSystems: [expect.objectContaining({
         id: 'user:local-brand',

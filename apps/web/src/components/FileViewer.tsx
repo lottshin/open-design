@@ -2290,14 +2290,12 @@ export function LiveArtifactViewer({
     if (mode !== 'preview') return undefined;
     const node = iframeRef.current;
     if (!node) return undefined;
-    const stopMetric = trackVisiblePreview({ iframe: node, renderMode: 'live_artifact', artifactKind: 'live_artifact' });
-    const stopLoad = trackIframeLoad({
+    return trackIframeLoad({
       iframe: node,
       surface: 'live_artifact_preview',
       artifactId: liveArtifact.artifactId,
       projectId,
     });
-    return () => { stopMetric(); stopLoad(); };
   }, [mode, previewUrl, liveArtifact.artifactId, projectId]);
 
   async function handleRefresh() {

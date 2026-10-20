@@ -690,12 +690,9 @@ describe('live artifact tool routes', () => {
     expect(preview.headers.get('vary')).toContain('Origin');
     const csp = preview.headers.get('content-security-policy') || '';
     expect(csp).toContain("default-src 'none'");
-    expect(csp).toMatch(/script-src 'sha256-[A-Za-z0-9+/=]+'/);
-    expect(csp).not.toContain("script-src 'unsafe-inline'");
-    expect(preview.body).toContain('data-od-preview-observability');
+    expect(csp).toContain("script-src 'none'");
     expect(csp).toContain("frame-ancestors 'self'");
-    expect(csp).toContain('sandbox allow-scripts');
-    expect(csp).not.toContain('allow-same-origin');
+    expect(csp).toContain('sandbox allow-same-origin');
     expect(preview.body).toContain('<h1>Preview Route Artifact</h1>');
     expect(preview.body).toContain('<p>Agent</p>');
 

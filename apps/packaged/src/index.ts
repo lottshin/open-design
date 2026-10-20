@@ -582,7 +582,7 @@ void main().catch(async (error: unknown) => {
   // can neither block nor crash the exit. No-op when telemetry isn't armed yet
   // or the build has no PostHog key.
   if (startupTelemetryContext) {
-    await Promise.all([packagedStartupTiming?.flush(), reportStartupFailure({
+    await reportStartupFailure({
       error,
       isPathAccess,
       dataRoot: startupTelemetryContext.dataRoot,
@@ -597,7 +597,7 @@ void main().catch(async (error: unknown) => {
       namespace: startupTelemetryContext.namespace,
       source: startupTelemetryContext.source,
       nativeModulePath: startupTelemetryContext.nativeModulePath,
-    })]);
+    });
   }
   process.exit(resolveSidecarLauncherExitCode(error));
 });

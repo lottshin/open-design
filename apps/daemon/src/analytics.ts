@@ -351,12 +351,18 @@ export function createAnalyticsService(args: {
     deviceId: string, clientType: 'web' | 'desktop' | 'daemon' | 'external_mcp',
     sessionId: string | null, captureSource: string, preserveUnknownAppVersion = false,
   ) => {
+    // Normalize placeholders only for telemetry; the public version API keeps
+    // its existing resolution and packaged-runtime classification.
+    const versionEnv = { ...env, OD_APP_VERSION: normalizeTelemetryAppVersion(env.OD_APP_VERSION) ?? undefined };
     const current = normalizeTelemetryAppVersion(appVersion)
-      ? resolveAppVersionInfo({ env, packagedRuntime, packageMetadata: { version: appVersion } })
-      : await readCurrentAppVersionInfo({ env, packagedRuntime });
+      ? resolveAppVersionInfo({ env: versionEnv, packageMetadata: { version: appVersion } })
+      : await readCurrentAppVersionInfo({ env: versionEnv });
+    const channel = !env.OD_RELEASE_CHANNEL?.trim() && !env.OD_APP_CHANNEL?.trim()
+      && current.channel === 'development' && (normalizeTelemetryAppVersion(env.OD_APP_VERSION) || packagedRuntime)
+      ? 'stable' : current.channel;
     return buildClientTelemetryParams(properties, {
       eventId, deviceId, appSessionId: sessionId, appVersion: current.version,
-      ...(preserveUnknownAppVersion ? {} : { channel: current.channel }), preserveUnknownAppVersion, clientType, captureSource, env: cfg.env,
+      ...(preserveUnknownAppVersion ? {} : { channel }), preserveUnknownAppVersion, clientType, captureSource, env: cfg.env,
       platform: process.platform,
       // os.release() is a kernel release on macOS/Linux, not the product OS
       // version. Preserve the legacy $os_version below, but leave the new

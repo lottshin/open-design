@@ -80,13 +80,11 @@ attempt ends. Existing diagnostic bridges retain their existing independent
 bounded lifecycle. Real low-end-device CPU/interaction-overhead measurement is
 still QA work; the implementation bounds are not a measured CPU percentage.
 
-Live artifacts previously disallowed all scripts. Their response now allows only
-the SHA-256 hash of the exact trusted observer bridge. Authored inline/external
-scripts, eval, connections, forms and origin access remain blocked. The response
-sandbox allows the trusted observer to execute and keeps its origin opaque;
-the iframe's existing sandbox remains in place. Injection uses the shared
-HTML-boundary scanner. A local Chromium fixture verifies visible/blank reporting,
-authored-script rejection and opaque-origin access; packaged-engine QA remains.
+Live artifacts keep their existing response bytes, CSP (`script-src 'none'`)
+and sandbox (`allow-same-origin`). No metric bridge is injected and no new
+preview attempt/result events are collected for that surface. Its existing
+load diagnostics remain. This surface is excluded from the new preview-rate
+denominator; do not weaken the security policy to improve measurement coverage.
 
 ## Rates and breakdowns
 
@@ -151,15 +149,16 @@ which includes asynchronous project/data/message resolution before chat mounts.
 
 ## Verification and QA handoff
 
-Focused unit/component/HTTP tests cover all four preview outcomes, all three
-render labels, visibility/activity exclusion, stale/foreign replies, probe caps,
+Focused unit/component/HTTP tests cover all four preview outcomes for srcdoc
+and URL previews, visibility/activity exclusion, stale/foreign replies, probe caps,
 transport uncertainty, safety delivery after opt-out, schema privacy, firstpaint fallback, router guard
-commit/cancel/no-op behavior, and live-preview CSP. New behavior regressions were
-also run against `aa88f4387` and fail there. Root guard/typecheck and exact test
-commands/results are retained in the external task conclusion/logs.
+commit/cancel/no-op behavior, and the unchanged live-preview CSP. Regression
+tests compare updater actions/state transitions with observation disabled,
+enabled and unable to write, and confirm shutdown does not wait for observation.
+Root guard/typecheck and exact commands/results are retained in task logs.
 
 QA must use the actual candidate desktop/web runtime with a
-local captured ingest sink. For each of srcdoc, URL preview and live artifact:
+local captured ingest sink. For each of srcdoc and URL preview:
 open visible content, a genuinely blank artifact and a deterministic load/runtime
 failure; verify one attempt and exactly one joined terminal result. Hide the app,
 change workspace, switch preview to source, park/switch retained frames and leave
@@ -173,10 +172,19 @@ Navigate Home ↔ Settings ↔ Projects ↔ Tasks ↔ Plugins ↔ Community, inc
 slow requests, successful empty lists, failed requests, rejected async guards,
 rapid supersession, scope changes and back/forward. Check first_visible before
 Ready, monotonic full intent durations, and no success before guard commit/data
-readiness. Verify live artifacts still block authored scripts and origin access
-in every packaged engine. Check firstpaint trusted/fallback breakdowns separately.
+readiness. Verify live-artifact response bytes and CSP/sandbox match the existing behavior
+in every packaged engine, with no new metric probe. Check firstpaint trusted/fallback breakdowns separately.
 
 Release owner must record the actual version and ingestion validation; QA owner
 must record native/platform results and overhead. Analytics owner must then
 observe at least seven full days after that actual release before comparing
 cohorts. The 2026-10-22 candidate schedule is not proof of release or acceptance.
+
+## Observation-only boundary
+
+Navigation guards, conversation mutations, catalog fallback values, automatic
+update decisions and shutdown completion retain their pre-instrumentation
+behavior. Observation cancellation must not cancel a business request; observer
+errors must not interrupt route commits. Catalog outcomes use a best-effort
+callback without converting failures into new exceptions. Update stages are
+recorded at existing execution points; no telemetry promise gates shutdown.

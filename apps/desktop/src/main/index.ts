@@ -995,7 +995,7 @@ async function runDesktopMainWithTiming(
           case SIDECAR_MESSAGES.CONSOLE:
             return activeDesktop.console();
           case SIDECAR_MESSAGES.SHOW:
-            showDesktop();
+            activeDesktop.show();
             dispatchInviteDeeplink(request.input?.deeplinkUrl ?? null);
             notifyDesktopExternalShow(options.onExternalShow);
             return { accepted: true };
@@ -1100,7 +1100,6 @@ async function runDesktopMainWithTiming(
     },
   });
 
-  function showDesktop() { desktop?.show(); }
   if (pendingUpdateDialogRequest) {
     pendingUpdateDialogRequest = false;
     desktop.openUpdateDialog({ source: "mac-app-menu" });
@@ -1109,9 +1108,7 @@ async function runDesktopMainWithTiming(
   options.onDesktopReady?.({
     dispatchInviteDeeplink,
     show: () => {
-      void Promise.resolve(options.onExternalShow?.()).finally(() => {
-        desktop?.show();
-      });
+      void Promise.resolve(options.onExternalShow?.()).finally(() => desktop?.show());
     },
   });
 
@@ -1180,7 +1177,7 @@ async function runDesktopMainWithTiming(
   });
 
   app.on("activate", () => {
-    showDesktop();
+    desktop?.show();
   });
 
   return {
