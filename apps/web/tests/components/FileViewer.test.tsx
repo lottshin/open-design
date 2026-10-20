@@ -50,6 +50,7 @@ vi.mock('../../src/analytics/provider', async () => {
 
 vi.mock('../../src/analytics/error-tracking', () => ({
   reportSafetyEvent: safetyEventMock,
+  reportClientMetricEvent: vi.fn(() => true),
 }));
 
 vi.mock('../../src/state/projects', async () => {
@@ -8853,6 +8854,8 @@ describe('FileViewer tweaks toolbar', () => {
   });
 
   it('reports diagnostics only from the active viewer and preview iframe', async () => {
+    // jsdom lays out 0x0; preview diagnostics now require a visible frame.
+    vi.spyOn(HTMLIFrameElement.prototype, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 800, 600));
     const teardownObserver = installPreviewIframeMessageObserver();
     try {
       const { rerender } = render(
@@ -9311,6 +9314,8 @@ describe('FileViewer tweaks toolbar', () => {
   });
 
   it('allows one fresh recovery when an unverified generation is reactivated', () => {
+    // jsdom lays out 0x0; preview diagnostics now require a visible frame.
+    vi.spyOn(HTMLIFrameElement.prototype, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 800, 600));
     vi.useFakeTimers();
     try {
       const renderViewer = (workspaceActive: boolean) => (
@@ -9443,6 +9448,8 @@ describe('FileViewer tweaks toolbar', () => {
   });
 
   it('uses an exact active ERR_ABORTED to probe an unverified generation once', () => {
+    // jsdom lays out 0x0; preview diagnostics now require a visible frame.
+    vi.spyOn(HTMLIFrameElement.prototype, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 800, 600));
     vi.useFakeTimers();
     let navigationFailureListener: OpenDesignHostPreviewNavigationFailureListener | null = null;
     const restoreHost = installMockOpenDesignHost({
@@ -9492,6 +9499,8 @@ describe('FileViewer tweaks toolbar', () => {
   });
 
   it('immediately recovers an exact active Open Design blob navigation abort', () => {
+    // jsdom lays out 0x0; preview diagnostics now require a visible frame.
+    vi.spyOn(HTMLIFrameElement.prototype, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 800, 600));
     vi.useFakeTimers();
     let navigationFailureListener: OpenDesignHostPreviewNavigationFailureListener | null = null;
     const restoreHost = installMockOpenDesignHost({
@@ -9539,6 +9548,8 @@ describe('FileViewer tweaks toolbar', () => {
   });
 
   it('probes the active unverified frame when Electron loses the aborted frame name', () => {
+    // jsdom lays out 0x0; preview diagnostics now require a visible frame.
+    vi.spyOn(HTMLIFrameElement.prototype, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 800, 600));
     vi.useFakeTimers();
     let navigationFailureListener: OpenDesignHostPreviewNavigationFailureListener | null = null;
     const restoreHost = installMockOpenDesignHost({

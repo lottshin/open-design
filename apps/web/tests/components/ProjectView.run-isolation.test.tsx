@@ -262,7 +262,8 @@ vi.mock('../../src/providers/registry', () => ({
 }));
 
 vi.mock('../../src/router', () => ({
-  navigate: vi.fn(),
+  // Real navigate commits synchronously via onCommit; ProjectView switches there.
+  navigate: vi.fn((_route: unknown, opts?: { onCommit?: () => void }) => opts?.onCommit?.()),
 }));
 
 vi.mock('../../src/state/projects', async (importOriginal) => ({

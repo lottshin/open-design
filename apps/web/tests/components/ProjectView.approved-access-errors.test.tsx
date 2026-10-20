@@ -37,7 +37,10 @@ const workspace = vi.hoisted(() => ({
 } satisfies WorkspaceCollabContext));
 
 vi.mock('../../src/analytics/provider', () => ({ useAnalytics: () => ({ track: vi.fn() }) }));
-vi.mock('../../src/router', () => ({ navigate: vi.fn() }));
+vi.mock('../../src/router', () => ({
+  // Real navigate commits synchronously via onCommit; ProjectView switches there.
+  navigate: vi.fn((_route: unknown, opts?: { onCommit?: () => void }) => opts?.onCommit?.()),
+}));
 vi.mock('../../src/providers/anthropic', () => ({ streamMessage: vi.fn() }));
 vi.mock('../../src/collab/useWorkspaceContext', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../src/collab/useWorkspaceContext')>()),

@@ -85,7 +85,8 @@ vi.mock('../../src/i18n', () => ({
 }));
 
 vi.mock('../../src/router', () => ({
-  navigate: vi.fn(),
+  // Real navigate commits synchronously via onCommit; ProjectView switches there.
+  navigate: vi.fn((_route: unknown, opts?: { onCommit?: () => void }) => opts?.onCommit?.()),
 }));
 
 vi.mock('../../src/providers/anthropic', () => ({

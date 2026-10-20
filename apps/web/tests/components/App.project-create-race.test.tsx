@@ -2517,7 +2517,9 @@ describe('App project creation routing', () => {
     expect(window.location.pathname).toBe('/settings');
     const events = vi.mocked(reportSafetyEvent).mock.calls
       .filter(([name]) => name === 'client_navigation_result').map(([, props]) => props);
-    expect(events.map((event) => event?.status)).toEqual(['started', 'cancelled']);
+    // The settings route is measured as its own page switch; assert only the project attempt.
+    const projectEvents = events.filter((event) => event?.navigation_id === events[0]?.navigation_id);
+    expect(projectEvents.map((event) => event?.status)).toEqual(['started', 'cancelled']);
   });
 
   it('gives repeated project clicks new ids and prevents the superseded lookup from navigating', async () => {
