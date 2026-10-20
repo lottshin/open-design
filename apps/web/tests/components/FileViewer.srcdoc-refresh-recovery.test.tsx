@@ -7,7 +7,6 @@ import { FileViewer } from '../../src/components/FileViewer';
 import {
   clearExceptionTrackingContext,
   setExceptionTrackingContext,
-  setClientMetricsConsent,
 } from '../../src/analytics/error-tracking';
 import type { ProjectFile } from '../../src/types';
 
@@ -47,10 +46,8 @@ function transportGeneration(frame: HTMLIFrameElement): string {
 }
 
 beforeEach(() => {
-  setClientMetricsConsent(true);
   vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({ width: 800, height: 600, top: 0, left: 0, bottom: 600, right: 800 } as DOMRect);
   setExceptionTrackingContext({
-    metricsEnabled: true,
     apiKey: 'phc_preview_test',
     host: 'https://posthog.test',
     distinctId: 'preview-test-user',
@@ -60,7 +57,6 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  setClientMetricsConsent(false);
   cleanup();
   clearExceptionTrackingContext();
   vi.useRealTimers();

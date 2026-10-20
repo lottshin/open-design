@@ -1,6 +1,5 @@
 // @vitest-environment jsdom
 
-import { setResponsivenessConsent } from '../../src/observability/responsiveness';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -154,7 +153,6 @@ const completedProjection = {
 };
 
 beforeEach(() => {
-  setResponsivenessConsent(true);
   eventCallbacks = [];
   document.body.innerHTML = '';
   fetchMock.mockReset();
@@ -174,7 +172,6 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  setResponsivenessConsent(false);
   __resetChatContextForTest();
   __resetChatInteractionForTest();
   vi.useRealTimers();

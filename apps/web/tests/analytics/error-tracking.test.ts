@@ -10,7 +10,6 @@ import {
   reportHandledException,
   reportSafetyEvent,
   reportClientMetricEvent,
-  setClientMetricsConsent,
   setExceptionTrackingContext as setProductionExceptionTrackingContext,
 } from '../../src/analytics/error-tracking';
 
@@ -40,7 +39,6 @@ const ORIGINAL_FETCH = globalThis.fetch;
 function setExceptionTrackingContext(
   next: {
     apiKey: string;
-    metricsEnabled?: boolean;
     host: string;
     distinctId: string;
     appVersion?: string;
@@ -52,7 +50,6 @@ function setExceptionTrackingContext(
 ): void {
   setProductionExceptionTrackingContext({
     clientType: 'web',
-    metricsEnabled: true,
     osName: 'Mac OS X',
     ...next,
   });
@@ -63,7 +60,6 @@ beforeEach(() => {
   fetchMock.mockResolvedValue(new Response('', { status: 200 }));
   globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
   clearExceptionTrackingContext();
-  setClientMetricsConsent(false);
 });
 
 afterEach(() => {
@@ -631,7 +627,7 @@ describe('CS01 safety envelope', () => {
   });
 });
 
-it('preserves consented metric occurrence metadata and strips URL/content properties', () => {
+it('preserves buffered safety metric occurrence metadata and strips URL/content properties', () => {
   const properties = {
     metric_schema_version: 1, event_id: 'original-event', app_session_id: 'original-session',
     app_version: '1.0.0-beta.1', client_version: '1.0.0-beta.1', channel: 'beta',
@@ -642,9 +638,8 @@ it('preserves consented metric occurrence metadata and strips URL/content proper
   };
   reportSafetyEvent('client_navigation_result', properties);
   expect(fetchMock).not.toHaveBeenCalled();
-  setClientMetricsConsent(true);
   setExceptionTrackingContext({ apiKey: 'phc_test', host: 'https://ingest.invalid', distinctId: 'install-1', appVersion: '2.0.0', sessionId: 'current-session', telemetryEnv: 'test' });
-  expect(fetchMock).not.toHaveBeenCalled();
+  expect(fetchMock).toHaveBeenCalledOnce();
   reportSafetyEvent('client_navigation_result', properties);
   const body = lastFetchedBody();
   expect(body).toMatchObject({ timestamp: properties.occurred_at, properties: {
@@ -656,38 +651,30 @@ it('preserves consented metric occurrence metadata and strips URL/content proper
 });
 
 
-it('fails closed for unknown/revoked metrics consent and never buffers metrics for later grants', () => {
-  setExceptionTrackingContext({ apiKey: 'phc_test', host: 'https://ingest.invalid', distinctId: 'install' });
+it('buffers preview metrics and reports after product analytics is opted out', async () => {
+  const { applyConsent } = await import('../../src/analytics/client');
+  applyConsent(false);
   const fields = { metric_schema_version: 1, preview_attempt_id: 'a', render_mode: 'srcdoc',
-    artifact_kind: null, started_at: new Date().toISOString(), telemetry_capability: 'supported' };
-  expect(reportClientMetricEvent('client_preview_attempt', fields)).toBe(false);
-  expect(fetchMock).not.toHaveBeenCalled();
-  setClientMetricsConsent(true);
-  expect(fetchMock).not.toHaveBeenCalled();
+    artifact_kind: null, started_at: new Date().toISOString(), telemetry_capability: 'supported',
+    path: '/private', url: 'https://private.invalid', content: 'secret', prompt: 'secret', pid: 123 };
   expect(reportClientMetricEvent('client_preview_attempt', fields)).toBe(true);
-  expect(lastFetchedBody().properties).toMatchObject({ device_id: 'install', artifact_kind: null });
-  setClientMetricsConsent(false);
-  expect(reportClientMetricEvent('client_preview_result', { ...fields, result: 'success', duration_ms: 1, monitoring_kind: 'visible_content' })).toBe(false);
-  expect(fetchMock).toHaveBeenCalledTimes(1);
-});
-
-it('keeps legacy preview/app-white-screen/firstpaint events consent-gated with compatible names', () => {
+  expect(fetchMock).not.toHaveBeenCalled();
   setExceptionTrackingContext({ apiKey: 'phc_test', host: 'https://ingest.invalid', distinctId: 'install' });
-  for (const event of ['client_preview_white_screen', 'client_white_screen', 'client_chat_first_paint']) reportSafetyEvent(event, { monitoring_kind: 'fixture' });
-  expect(fetchMock).not.toHaveBeenCalled();
-  setClientMetricsConsent(true);
-  reportSafetyEvent('client_preview_white_screen', { monitoring_kind: 'no_visible_paint_after_timeout' });
-  expect(lastFetchedBody()).toMatchObject({ event: 'client_preview_white_screen', properties: { monitoring_kind: 'no_visible_paint_after_timeout' } });
+  expect(fetchMock).toHaveBeenCalledOnce();
+  expect(reportClientMetricEvent('client_preview_result', { ...fields, result: 'success', duration_ms: 1, monitoring_kind: 'visible_content' })).toBe(true);
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+  for (const [, init] of fetchMock.mock.calls) {
+    const properties = JSON.parse(init.body).properties;
+    for (const key of ['path', 'url', 'content', 'prompt', 'pid', '$current_url']) expect(properties).not.toHaveProperty(key);
+  }
 });
 
-
-it('rejects a missing or denied daemon consent decision even after a local opt-in', () => {
-  setClientMetricsConsent(true);
-  const fields = { metric_schema_version: 1, preview_attempt_id: 'a', render_mode: 'srcdoc',
-    artifact_kind: null, started_at: new Date().toISOString(), telemetry_capability: 'supported' };
-  setExceptionTrackingContext({ apiKey: 'key', host: 'https://ingest.invalid', distinctId: 'install', metricsEnabled: undefined });
-  expect(reportClientMetricEvent('client_preview_attempt', fields)).toBe(false);
-  setExceptionTrackingContext({ apiKey: 'key', host: 'https://ingest.invalid', distinctId: 'install', metricsEnabled: false });
-  expect(reportClientMetricEvent('client_preview_attempt', fields)).toBe(false);
+it('keeps legacy preview/app-white-screen/firstpaint events on the safety channel after opt-out', async () => {
+  const { applyConsent } = await import('../../src/analytics/client');
+  applyConsent(false);
+  const names = ['client_preview_white_screen', 'client_preview_runtime_error', 'client_preview_resource_error', 'client_white_screen', 'client_chat_first_paint'];
+  for (const event of names) reportSafetyEvent(event, { monitoring_kind: 'fixture' });
   expect(fetchMock).not.toHaveBeenCalled();
+  setExceptionTrackingContext({ apiKey: 'phc_test', host: 'https://ingest.invalid', distinctId: 'install' });
+  expect(fetchMock.mock.calls.map(([, init]) => JSON.parse(init.body).event)).toEqual(names);
 });

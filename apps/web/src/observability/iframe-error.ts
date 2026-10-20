@@ -543,14 +543,8 @@ export function trackVisiblePreview(options: {
     update();
   });
   intersection?.observe(iframe);
-  const onConsentAvailability = (event: Event) => {
-    if ((event as CustomEvent<{ enabled?: boolean }>).detail?.enabled === false) {
-      finish('cancelled'); current = null; attemptId = null;
-    } else update();
-  };
   document.addEventListener('visibilitychange', update);
   window.addEventListener('pagehide', onPageHide);
-  window.addEventListener('od:client-metrics-available', onConsentAvailability);
   iframe.addEventListener('od:preview-transport-recovery', onTransportRecovery);
   window.addEventListener('message', onMessage);
   iframe.addEventListener('load', probe);
@@ -563,7 +557,6 @@ export function trackVisiblePreview(options: {
     if (activityTimer !== null) clearTimeout(activityTimer);
     document.removeEventListener('visibilitychange', update);
     window.removeEventListener('pagehide', onPageHide);
-    window.removeEventListener('od:client-metrics-available', onConsentAvailability);
     iframe.removeEventListener('od:preview-transport-recovery', onTransportRecovery);
     window.removeEventListener('message', onMessage);
     iframe.removeEventListener('load', probe); iframe.removeEventListener('error', onError);

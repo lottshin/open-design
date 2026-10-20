@@ -29,7 +29,6 @@ import {
 } from './client';
 import { APP_VERSION_PLACEHOLDER } from './app-version';
 import { patchExceptionTrackingAppVersion } from './error-tracking';
-import { refreshResponsivenessConsent } from '../observability/responsiveness';
 import { setChatCorrelation } from '../observability/chat-context';
 import type { AnalyticsConfigureGlobals } from '@open-design/contracts/analytics';
 import {
@@ -351,7 +350,6 @@ export function AnalyticsProvider({ children }: { children: ReactNode }) {
     () => ({
       track,
       setConsent: (granted: boolean) => {
-        void refreshResponsivenessConsent(granted);
         applyConsent(granted);
         if (!granted) {
           // Clear the header-injection state so the fetch wrapper effect

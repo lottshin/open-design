@@ -16,8 +16,8 @@
 //   client_chat_memory_pressure  "Who is about to OOM?"
 //   client_chat_stream_health    "How janky is the UI while a run streams?"
 //
-// Transport uses the fail-closed metrics-consent gate before the existing
-// envelope/validation path. No new health telemetry is sent while opted out.
+// Transport uses the existing safety channel independently of metrics consent.
+// Reports retain the existing envelope/validation path.
 //
 // Cost discipline. Measurement must never become the jank it measures:
 //
@@ -49,8 +49,8 @@ import type {
 } from '@open-design/contracts/analytics';
 
 import {
-  onResponsivenessConsent, reportResponsiveness,
-  responsivenessConsent, responsivenessVisible,
+  reportResponsiveness,
+  responsivenessVisible,
 } from './responsiveness';
 import {
   chatBreadcrumbTrail,
@@ -236,7 +236,6 @@ class ChatSurface implements ChatSurfaceHandle {
   private sampleTimer: ReturnType<typeof setInterval> | null = null;
 
   private longTaskObserver: PerformanceObserver | null = null;
-  private stopConsent: (() => void) | null = null;
   private activeRunId: string | null = null;
   private windowStartedAt = 0;
   private windowBlockedMs = 0;
@@ -272,13 +271,7 @@ class ChatSurface implements ChatSurfaceHandle {
       schedule(() => this.sample('interval'));
     }, SAMPLE_INTERVAL_MS);
 
-    this.stopConsent = onResponsivenessConsent((enabled) => {
-      this.stopLongTaskObserver();
-      // Samples from an earlier grant must not escape after re-grant.
-      this.resetStreamWindow();
-      if (enabled) this.installLongTaskObserver();
-    });
-    if (responsivenessConsent()) this.installLongTaskObserver();
+    this.installLongTaskObserver();
 
     if (typeof document !== 'undefined') {
       this.onVisibilityChange = () => {
@@ -297,7 +290,6 @@ class ChatSurface implements ChatSurfaceHandle {
   markFirstPaint(input: { renderedRowCount: number }): void {
     if (this.detached || this.paintReported) return;
     this.paintReported = true;
-    if (!responsivenessConsent()) return;
     pushChatBreadcrumb('first_paint');
     const trust = chatMeasurementTrust({ hiddenDuringWindow: this.hiddenSincePaintWindow });
     const props: ChatFirstPaintProps = {
@@ -336,7 +328,7 @@ class ChatSurface implements ChatSurfaceHandle {
   }
 
   sample(reason: ChatSampleReason): void {
-    if (this.detached || !responsivenessConsent()) return;
+    if (this.detached) return;
     const domNodeCount = this.countDescendants();
     const heap = readHeap();
 
@@ -413,8 +405,6 @@ class ChatSurface implements ChatSurfaceHandle {
     if (this.streamTimer != null) clearInterval(this.streamTimer);
     this.sampleTimer = null;
     this.streamTimer = null;
-    this.stopConsent?.();
-    this.stopConsent = null;
     this.stopLongTaskObserver();
     if (activeSurface === this) activeSurface = null;
   }

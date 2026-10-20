@@ -1,6 +1,6 @@
 import {
-  createExposureClock, onResponsivenessConsent, reportResponsiveness,
-  responsivenessConsent, responsivenessVisible,
+  createExposureClock, reportResponsiveness,
+  responsivenessVisible,
 } from './responsiveness';
 
 const WINDOW_MS = 30_000;
@@ -92,16 +92,14 @@ export function installLongTaskObserver(): () => void {
     }
     startCheckpoint();
   };
-  const stop = (discard = false) => {
+  const stop = () => {
     observer?.disconnect(); observer = null; supported = false;
-    if (discard || checkpoint?.count === 0) saveCheckpoint(null);
+    if (checkpoint?.count === 0) saveCheckpoint(null);
     else if (checkpoint) saveCheckpoint(checkpoint);
     checkpoint = null; reset();
   };
-  const unsubscribe = onResponsivenessConsent((enabled) => { if (enabled) start(); else stop(true); });
-  if (responsivenessConsent()) start();
+  start();
   const timer = setInterval(() => {
-    if (!responsivenessConsent()) return;
     const exposure = clock.tick();
     const qualified = supported && exposure.qualified;
     reportResponsiveness('client_responsiveness_window', {
@@ -125,7 +123,7 @@ export function installLongTaskObserver(): () => void {
   document.addEventListener('visibilitychange', visibility);
   window.addEventListener('pagehide', pagehide);
   return () => {
-    unsubscribe(); clearInterval(timer); clock.stop(); stop();
+    clearInterval(timer); clock.stop(); stop();
     document.removeEventListener('visibilitychange', visibility);
     window.removeEventListener('pagehide', pagehide);
     installed = false;

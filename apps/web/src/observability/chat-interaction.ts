@@ -1,8 +1,8 @@
 import type { ChatInteractionLatencyProps } from '@open-design/contracts/analytics';
 import { chatCorrelation } from './chat-context';
 import {
-  createExposureClock, onResponsivenessConsent, reportResponsiveness,
-  responsivenessConsent, responsivenessVisible,
+  createExposureClock, reportResponsiveness,
+  responsivenessVisible,
 } from './responsiveness';
 
 const WINDOW_MS = 30_000;
@@ -63,7 +63,7 @@ export function installChatInteractionObserver(): () => void {
         for (const entry of list.getEntries()) {
           const timing = entry as PerformanceEventTiming;
           if (!Number.isFinite(timing.duration) || timing.duration < 16) continue;
-          // Ignore entries that began while consent was off or the page hidden.
+          // Ignore entries that began before observation or while the page was hidden.
           if (Number.isFinite(timing.startTime) && timing.startTime < since) continue;
           const el = timing.target instanceof Element ? timing.target : null;
           if (!el) continue;
@@ -98,8 +98,7 @@ export function installChatInteractionObserver(): () => void {
       supported = true;
     } catch { stop(); }
   };
-  const unsubscribe = onResponsivenessConsent((enabled) => { if (enabled) start(); else stop(); });
-  if (responsivenessConsent()) start();
+  start();
   const keydown = (event: KeyboardEvent) => {
     if (!event.isTrusted || !supported || !responsivenessVisible() || !(event.target instanceof Element)) return;
     const area = inputArea(event.target);
@@ -109,7 +108,6 @@ export function installChatInteractionObserver(): () => void {
   document.addEventListener('keydown', keydown, { capture: true, passive: true });
   document.addEventListener('visibilitychange', visibility);
   const timer = setInterval(() => {
-    if (!responsivenessConsent()) return;
     const exposure = clock.tick();
     const measurable = supported && exposure.qualified;
     reportResponsiveness('client_responsiveness_window', {
@@ -137,7 +135,7 @@ export function installChatInteractionObserver(): () => void {
     inputs.clear(); current = null;
   }, WINDOW_MS);
   const cleanup = () => {
-    unsubscribe(); stop(); clock.stop(); clearInterval(timer);
+    stop(); clock.stop(); clearInterval(timer);
     document.removeEventListener('keydown', keydown, { capture: true });
     document.removeEventListener('visibilitychange', visibility);
     teardown = null;

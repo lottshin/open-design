@@ -1,7 +1,6 @@
 // @vitest-environment jsdom
 import { beforeEach, afterEach, expect, it, vi } from 'vitest';
 import { installChatInteractionObserver, __resetChatInteractionForTest } from '../../src/observability/chat-interaction';
-import { setResponsivenessConsent } from '../../src/observability/responsiveness';
 import { clearExceptionTrackingContext, setExceptionTrackingContext } from '../../src/analytics/error-tracking';
 let callback: PerformanceObserverCallback;
 let stop: () => void;
@@ -22,7 +21,7 @@ beforeEach(() => {
     disconnect() {}
   });
   setExceptionTrackingContext({ apiKey: 'test', host: 'https://example.test', distinctId: 'test-install', clientType: 'web', osName: 'Mac OS X' });
-  __resetChatInteractionForTest(); setResponsivenessConsent(true);
+  __resetChatInteractionForTest();
   document.body.innerHTML = '<div data-testid="chat-composer"><textarea></textarea></div><input type="search"><div class="modal-settings"><input></div><input type="password">';
   const add = document.addEventListener.bind(document);
   vi.spyOn(document, 'addEventListener').mockImplementation((type, listener, options) => {
@@ -31,7 +30,7 @@ beforeEach(() => {
   });
   stop = installChatInteractionObserver();
 });
-afterEach(() => { stop(); __resetChatInteractionForTest(); setResponsivenessConsent(false); clearExceptionTrackingContext(); vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers(); });
+afterEach(() => { stop(); __resetChatInteractionForTest(); clearExceptionTrackingContext(); vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers(); });
 function emit(duration: number, target: Element = document.querySelector('textarea')!, name = 'keydown', startTime = performance.now()) {
   callback({ getEntries: () => [{ duration, name, target, startTime, processingStart: startTime + 40 }] } as unknown as PerformanceObserverEntryList, {} as PerformanceObserver);
 }
@@ -56,12 +55,14 @@ it('covers search/settings and excludes password fields and synthetic attempts',
   expect(named('client_input_responsiveness').map((e) => e.area)).toEqual(['search', 'settings']);
   expect(named('client_input_responsiveness').every((e) => e.input_attempt_count === 0)).toBe(true);
 });
-it('rejects pre-consent and duplicate timing records and clears pending samples on opt-out', () => {
+it('rejects pre-observation and duplicate timing records and keeps sampling after opt-out', async () => {
+  const { applyConsent } = await import('../../src/analytics/client');
+  applyConsent(false);
   emit(600, undefined, 'keydown', -1); emit(600, undefined, 'keydown', 1); emit(600, undefined, 'keydown', 1);
   vi.advanceTimersByTime(30_000);
   expect(named('client_input_responsiveness')[0].qualified_sample_count).toBe(1);
-  emit(700); setResponsivenessConsent(false); vi.advanceTimersByTime(30_000);
-  expect(named('client_input_responsiveness')).toHaveLength(1);
+  emit(700); vi.advanceTimersByTime(30_000);
+  expect(named('client_input_responsiveness')).toHaveLength(2);
 });
 
 it('counts trusted fast input attempts without inventing an Event Timing duration', () => {

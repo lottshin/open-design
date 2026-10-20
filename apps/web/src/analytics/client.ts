@@ -16,7 +16,6 @@ import {
   clearExceptionTrackingContext,
   detectBrowserOsName,
   setExceptionTrackingContext,
-  setClientMetricsConsent,
 } from './error-tracking';
 import { pinFirstSessionForCapture } from './identity';
 import { registerChatReplaySessionSource } from '../observability/chat-context';
@@ -227,7 +226,6 @@ export function bootstrapExceptionTracking(context: AnalyticsContext): Promise<v
       const hostStartupContext = await getOpenDesignHost()?.startup?.context().catch(() => null);
       setExceptionTrackingContext({
         apiKey: cfg.key,
-        metricsEnabled: cfg.enabled === true,
         host: cfg.host,
         distinctId,
         clientType: context.clientType,
@@ -400,7 +398,6 @@ export async function getAnalyticsClient(
           // up-to-date appVersion / sessionId metadata is attached.
           setExceptionTrackingContext({
             apiKey: cfgKey,
-            metricsEnabled: cfg.enabled === true,
             host: cfgHost,
             distinctId,
             clientType: context.clientType,
@@ -475,7 +472,6 @@ let lastConsentGranted = false;
 // posthog-js would still think the user is the old id and stitch the
 // new session to the deleted identity. reset() prevents that.
 export function applyConsent(consentGranted: boolean): void {
-  setClientMetricsConsent(consentGranted);
   // A fresh GRANT is the one event that can turn a null init into a live
   // client, so it — and only it — reopens the `/api/analytics/config` read
   // `getAnalyticsClient` memoised. The provider calls this before it re-calls

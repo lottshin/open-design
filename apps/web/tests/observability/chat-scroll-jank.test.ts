@@ -1,7 +1,6 @@
 // @vitest-environment jsdom
 import { beforeEach, afterEach, expect, it, vi } from 'vitest';
 import { installChatScrollJankObserver } from '../../src/observability/chat-scroll-jank';
-import { setResponsivenessConsent } from '../../src/observability/responsiveness';
 import { setExceptionTrackingContext, clearExceptionTrackingContext } from '../../src/analytics/error-tracking';
 let stop: () => void;
 let frame: FrameRequestCallback | undefined;
@@ -22,10 +21,9 @@ beforeEach(() => {
   raf.mockReset().mockImplementation((cb) => { frame = cb; return 1; });
   vi.stubGlobal('requestAnimationFrame', raf); vi.stubGlobal('cancelAnimationFrame', vi.fn());
   setExceptionTrackingContext({ apiKey: 'test', host: 'https://example.test', distinctId: 'test-install', clientType: 'web', osName: 'Mac OS X' });
-  document.body.innerHTML = '<div data-testid="chat-log"></div>';
-  setResponsivenessConsent(true); stop = installChatScrollJankObserver();
+  document.body.innerHTML = '<div data-testid="chat-log"></div>'; stop = installChatScrollJankObserver();
 });
-afterEach(() => { stop(); setResponsivenessConsent(false); clearExceptionTrackingContext(); vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers(); });
+afterEach(() => { stop(); clearExceptionTrackingContext(); vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers(); });
 function activity() { wheel({ target: document.querySelector('div'), isTrusted: true } as unknown as Event); }
 it('does no idle frame work and reports cadence separately from freeze', () => {
   expect(raf).not.toHaveBeenCalled(); activity();
@@ -34,14 +32,14 @@ it('does no idle frame work and reports cadence separately from freeze', () => {
   expect(named()[0]).toMatchObject({ frame_count: 4, interval_count: 3, over_50ms_count: 1, max_frame_interval_ms: 80, measurable: true });
   expect(fetchMock.mock.calls.map((c) => JSON.parse(c[1].body as string).event)).not.toContain('client_chat_scroll_frozen');
 });
-it('bounds continuous scrolling at 120 frame callbacks per window and cancels on opt-out', () => {
+it('bounds continuous scrolling at 120 frame callbacks per window and cancels on teardown', () => {
   activity();
   for (let i = 0; i < 120; i++) { activity(); frame!(i * 5); }
   const calls = raf.mock.calls.length; activity();
   expect(raf.mock.calls.length).toBe(calls);
   vi.advanceTimersByTime(30_000);
   expect(named()[0]).toMatchObject({ frame_count: 120, sampling_truncated: true });
-  activity(); setResponsivenessConsent(false);
+  activity(); stop();
   expect(cancelAnimationFrame).toHaveBeenCalled();
 });
 it('discards suspended frame callbacks rather than labelling sleep as jank', () => {

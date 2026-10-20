@@ -1,7 +1,7 @@
 /** Frame cadence during actual chat scrolling; independent of compositor freeze. */
 import {
-  createExposureClock, onResponsivenessConsent, reportResponsiveness,
-  responsivenessConsent, responsivenessVisible,
+  createExposureClock, reportResponsiveness,
+  responsivenessVisible,
 } from './responsiveness';
 
 const WINDOW_MS = 30_000;
@@ -47,12 +47,10 @@ export function installChatScrollJankObserver(): () => void {
     until = performance.now() + ACTIVE_MS;
     if (handle === null) handle = requestAnimationFrame(frame);
   };
-  const unsubscribe = onResponsivenessConsent(reset);
   document.addEventListener('wheel', activity, { capture: true, passive: true });
   document.addEventListener('scroll', activity, { capture: true, passive: true });
   document.addEventListener('visibilitychange', reset);
   const timer = setInterval(() => {
-    if (!responsivenessConsent()) return;
     const exposure = clock.tick();
     const measurable = supported && exposure.qualified;
     if (frames > 0 || !measurable) reportResponsiveness('client_chat_scroll_frames', {
@@ -65,7 +63,7 @@ export function installChatScrollJankObserver(): () => void {
     cancel(); frames = 0; gaps = 0; intervals = 0; worst = null; truncated = false;
   }, WINDOW_MS);
   return () => {
-    unsubscribe(); cancel(); clock.stop(); clearInterval(timer);
+    cancel(); clock.stop(); clearInterval(timer);
     document.removeEventListener('wheel', activity, { capture: true });
     document.removeEventListener('scroll', activity, { capture: true });
     document.removeEventListener('visibilitychange', reset);

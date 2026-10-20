@@ -86,18 +86,3 @@ it('bounds probes and classifies missing transport evidence as error, not white 
   expect(vi.mocked(reportClientMetricEvent).mock.calls[1]![1]).toMatchObject({ result: 'error', monitoring_kind: 'srcdoc_transport_unverified' });
   stop(); frame.remove(); vi.useRealTimers(); vi.restoreAllMocks();
 });
-
-it('stops pending probes on revocation and starts a fresh denominator after a new grant', async () => {
-  const { reportClientMetricEvent } = await import('../../src/analytics/error-tracking');
-  vi.mocked(reportClientMetricEvent).mockClear(); vi.useFakeTimers();
-  const frame = document.createElement('iframe'); document.body.append(frame);
-  vi.spyOn(frame, 'getBoundingClientRect').mockReturnValue({ width: 100, height: 100, top: 0, left: 0, bottom: 100, right: 100 } as DOMRect);
-  const post = vi.spyOn(frame.contentWindow!, 'postMessage').mockImplementation(() => {});
-  const stop = trackVisiblePreview({ iframe: frame, renderMode: 'srcdoc', artifactKind: null });
-  window.dispatchEvent(new CustomEvent('od:client-metrics-available', { detail: { enabled: false } }));
-  vi.advanceTimersByTime(60_000);
-  expect(post).not.toHaveBeenCalled();
-  window.dispatchEvent(new CustomEvent('od:client-metrics-available', { detail: { enabled: true } }));
-  expect(vi.mocked(reportClientMetricEvent).mock.calls.filter(([name]) => name === 'client_preview_attempt')).toHaveLength(2);
-  stop(); frame.remove(); vi.useRealTimers(); vi.restoreAllMocks();
-});

@@ -1,13 +1,11 @@
 // @vitest-environment jsdom
 
-import { setResponsivenessConsent } from '../../src/observability/responsiveness';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   clearExceptionTrackingContext,
   setExceptionTrackingContext,
-  setClientMetricsConsent,
 } from '../../src/analytics/error-tracking';
 import {
   __resetChatHealthForTest,
@@ -118,15 +116,12 @@ function buildChatLog(rows: number): HTMLElement {
 }
 
 beforeEach(() => {
-  setResponsivenessConsent(true);
-  setClientMetricsConsent(true);
   clock = 0;
   longTaskCallbacks = [];
   fetchMock.mockReset();
   fetchMock.mockResolvedValue(new Response('', { status: 200 }));
   globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
   setExceptionTrackingContext({
-    metricsEnabled: true,
     apiKey: 'phc_test',
     host: 'https://us.i.posthog.com',
     distinctId: 'chat-health-test',
@@ -146,8 +141,6 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  setResponsivenessConsent(false);
-  setClientMetricsConsent(false);
   __resetChatHealthForTest();
   vi.useRealTimers();
   vi.restoreAllMocks();
@@ -416,33 +409,22 @@ describe('observability/chat-health — provider-facing seam', () => {
 });
 
 
-it('does not report chat health while metrics consent is withdrawn', () => {
-  setResponsivenessConsent(false);
+it('reports chat health and keeps observing after product analytics opt-out', async () => {
+  const { applyConsent } = await import('../../src/analytics/client');
+  applyConsent(false);
   const handle = openChatSurface({ element: buildChatLog(1), messageCount: 1, virtualized: false });
   handle.markFirstPaint({ renderedRowCount: 1 });
   handle.sample('interval');
-  expect(eventsNamed('client_chat_first_paint')).toHaveLength(0);
-  expect(eventsNamed('client_chat_dom_growth')).toHaveLength(0);
-  handle.detach();
-});
-
-it('disconnects chat health collection on opt-out and discards the previous grant window', () => {
-  const handle = openChatSurface({ element: buildChatLog(1), messageCount: 1, virtualized: false });
-  handle.runStarted('run-consent');
+  expect(eventsNamed('client_chat_first_paint')).toHaveLength(1);
+  expect(eventsNamed('client_chat_dom_growth')).toHaveLength(1);
+  handle.runStarted('run-optout');
   advanceClock(1_000);
   emitLongTask(600);
   expect(longTaskCallbacks).toHaveLength(1);
-  setResponsivenessConsent(false);
-  expect(longTaskCallbacks).toHaveLength(0);
-  const census = vi.spyOn(document.querySelector('.chat-log')!, 'getElementsByTagName');
-  handle.sample('interval');
-  expect(census).not.toHaveBeenCalled();
+  applyConsent(false);
   advanceClock(1_000);
-  setResponsivenessConsent(true);
-  expect(longTaskCallbacks).toHaveLength(1);
-  advanceClock(1_000);
-  handle.runEnded('run-consent');
-  expect(eventsNamed('client_chat_stream_health')).toHaveLength(0);
+  handle.runEnded('run-optout');
+  expect(eventsNamed('client_chat_stream_health')).toHaveLength(1);
   handle.detach();
   expect(longTaskCallbacks).toHaveLength(0);
 });

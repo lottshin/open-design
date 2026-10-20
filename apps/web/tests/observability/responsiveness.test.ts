@@ -1,32 +1,13 @@
 // @vitest-environment jsdom
-import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { createExposureClock, refreshResponsivenessConsent, responsivenessConsent, setResponsivenessConsent, reportResponsiveness } from '../../src/observability/responsiveness';
+import { afterEach, expect, it, vi } from 'vitest';
+import { createExposureClock, reportResponsiveness } from '../../src/observability/responsiveness';
 import { clearExceptionTrackingContext, setExceptionTrackingContext } from '../../src/analytics/error-tracking';
-beforeEach(() => { setResponsivenessConsent(false); });
-afterEach(async () => { await refreshResponsivenessConsent(false); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
-it('treats unreadable or denied daemon consent as disabled despite a granted UI fallback', async () => {
-  const fetcher = vi.fn().mockRejectedValueOnce(new Error('offline'))
-    .mockResolvedValueOnce(new Response(JSON.stringify({ enabled: false })))
-    .mockResolvedValueOnce(new Response(JSON.stringify({ enabled: true })));
-  vi.stubGlobal('fetch', fetcher);
-  await refreshResponsivenessConsent(true); expect(responsivenessConsent()).toBe(false);
-  await refreshResponsivenessConsent(true); expect(responsivenessConsent()).toBe(false);
-  await refreshResponsivenessConsent(true); expect(responsivenessConsent()).toBe(true);
-});
-it('does not grant from a stale response after a later opt-out', async () => {
-  let resolve: (value: Response) => void = () => undefined;
-  vi.stubGlobal('fetch', vi.fn().mockImplementation(() => new Promise<Response>((r) => { resolve = r; })));
-  const grant = refreshResponsivenessConsent(true);
-  await refreshResponsivenessConsent(false);
-  resolve(new Response(JSON.stringify({ enabled: true })));
-  await grant; expect(responsivenessConsent()).toBe(false);
-});
+afterEach(() => { clearExceptionTrackingContext(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 it('drops a timer gap longer than the foreground exposure budget', () => {
   vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
   let now = 0;
   vi.spyOn(performance, 'now').mockImplementation(() => now);
   vi.spyOn(Date, 'now').mockImplementation(() => now);
-  setResponsivenessConsent(true);
   const clock = createExposureClock(); now = 90_000;
   expect(clock.tick()).toEqual({ qualified: false, elapsed: null });
   now += 30_000;
@@ -34,30 +15,32 @@ it('drops a timer gap longer than the foreground exposure budget', () => {
   clock.stop();
 });
 
-it('drops buffered responsiveness metrics if consent was withdrawn before transport context arrives', () => {
+it('sends buffered responsiveness metrics after product analytics opt-out', async () => {
+  const { applyConsent } = await import('../../src/analytics/client');
+  applyConsent(false);
   const fetcher = vi.fn().mockResolvedValue(new Response(''));
   vi.stubGlobal('fetch', fetcher);
   clearExceptionTrackingContext();
-  setResponsivenessConsent(true);
   reportResponsiveness('client_long_task', { duration_ms: 5_000 });
-  setResponsivenessConsent(false);
   setExceptionTrackingContext({ apiKey: 'test', host: 'https://example.test', distinctId: 'test-install', clientType: 'web', osName: 'Mac OS X' });
-  expect(fetcher).not.toHaveBeenCalled();
+  expect(fetcher).toHaveBeenCalledOnce();
   clearExceptionTrackingContext();
 });
 
-it('does not release an old grant buffer after re-grant, but sends new samples', () => {
+it('keeps early safety samples through product analytics consent changes', async () => {
+  const { applyConsent } = await import('../../src/analytics/client');
+  applyConsent(true);
   const fetcher = vi.fn().mockResolvedValue(new Response(''));
   vi.stubGlobal('fetch', fetcher);
   clearExceptionTrackingContext();
-  setResponsivenessConsent(true);
   reportResponsiveness('client_long_task', { duration_ms: 5_000 });
-  setResponsivenessConsent(false);
-  setResponsivenessConsent(true);
+  applyConsent(false);
+  applyConsent(true);
   reportResponsiveness('client_long_task', { duration_ms: 6_000 });
   setExceptionTrackingContext({ apiKey: 'test', host: 'https://example.test', distinctId: 'test-install', clientType: 'web', osName: 'Mac OS X' });
-  expect(fetcher).toHaveBeenCalledTimes(1);
-  expect(JSON.parse(fetcher.mock.calls[0]![1].body).properties.duration_ms).toBe(6_000);
+  expect(fetcher).toHaveBeenCalledTimes(2);
+  expect(JSON.parse(fetcher.mock.calls[0]![1].body).properties.duration_ms).toBe(5_000);
+  expect(JSON.parse(fetcher.mock.calls[1]![1].body).properties.duration_ms).toBe(6_000);
   clearExceptionTrackingContext();
 });
 
@@ -65,7 +48,6 @@ it('validates new metrics through the buffered transport and preserves occurrenc
   const fetcher = vi.fn().mockResolvedValue(new Response(''));
   vi.stubGlobal('fetch', fetcher);
   clearExceptionTrackingContext();
-  setResponsivenessConsent(true);
   const occurredAt = '2026-10-18T01:02:03.000Z';
   const fields = {
     telemetry_capability: 'supported', occurred_at: occurredAt,

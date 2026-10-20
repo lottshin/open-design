@@ -5,7 +5,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   clearExceptionTrackingContext,
   setExceptionTrackingContext,
-  setClientMetricsConsent,
 } from '../../src/analytics/error-tracking';
 import { installWhiteScreenDetector } from '../../src/observability/white-screen';
 
@@ -24,13 +23,11 @@ const fetchMock = vi.fn();
 const ORIGINAL_FETCH = globalThis.fetch;
 
 beforeEach(() => {
-  setClientMetricsConsent(true);
   fetchMock.mockReset();
   fetchMock.mockResolvedValue(new Response('', { status: 200 }));
   globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
   // Pre-arm the transport so the buffered event flushes immediately.
   setExceptionTrackingContext({
-    metricsEnabled: true,
     apiKey: 'phc_test',
     host: 'https://us.i.posthog.com',
     distinctId: 'white-screen-test',
@@ -43,7 +40,6 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  setClientMetricsConsent(false);
   vi.useRealTimers();
   clearExceptionTrackingContext();
   globalThis.fetch = ORIGINAL_FETCH;

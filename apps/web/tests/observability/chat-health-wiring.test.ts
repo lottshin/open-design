@@ -1,6 +1,5 @@
 // @vitest-environment jsdom
 
-import { setResponsivenessConsent } from '../../src/observability/responsiveness';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -138,7 +137,6 @@ async function runOneTurn(handlers: ReturnType<typeof daemonHandlers>): Promise<
 }
 
 beforeEach(() => {
-  setResponsivenessConsent(true);
   longTaskCallbacks = [];
   document.body.innerHTML = '';
   fetchMock.mockReset();
@@ -158,7 +156,6 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  setResponsivenessConsent(false);
   __resetChatHealthForTest();
   __resetChatContextForTest();
   vi.restoreAllMocks();
