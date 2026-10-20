@@ -1503,6 +1503,8 @@ function AppInner() {
       && appliedProjectListWitness?.displayKey === currentProjectDisplayKey
       && projectListFailure?.displayKey !== currentProjectDisplayKey
       && agentsReady && !agentsLoading && !skillsLoading && !dsLoading && !promptTemplatesLoading
+      && designTemplatesReady && promptTemplatesReady
+      && workspaceSkills.ready && workspaceDesignSystems.ready
       && workspaceSkills.identity === currentWorkspaceCatalogIdentity
       && workspaceDesignSystems.identity === currentWorkspaceCatalogIdentity
       && (route.kind !== 'home' || route.view !== 'settings' || !composioConfigLoading),
