@@ -130,7 +130,12 @@ it("the real desktop reveal callback records a phase without declaring business 
   expect(callback).not.toBe("");
   const { timing, events } = fixture();
   const js = ts.transpileModule(`const reveal = ${callback}; reveal();`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
-  runInNewContext(js, { startupTiming: timing, recordIncomingUpdateLifecycle: vi.fn(), options: {}, updater: { config: {} } });
+  runInNewContext(js, {
+    startupTiming: timing, recordIncomingUpdateLifecycle: vi.fn(),
+    recordIncomingUpdateStageResults: vi.fn(),
+    process: { getSystemVersion: () => 'test-os', platform: 'darwin', arch: 'arm64' },
+    options: {}, updater: { config: {} },
+  });
   timing.finish("cancelled", "quit_before_ready");
   expect(events.at(-1)?.properties.stage_offsets_ms).toHaveProperty("window_revealed");
   expect(events.some(e => e.event === "client_business_ready")).toBe(false);

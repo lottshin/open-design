@@ -460,7 +460,7 @@ describe('design-system Workspace scope', () => {
     });
   });
 
-  it('keeps personal and official systems available when team materialization fails', async () => {
+  it.each([false, true])('keeps personal and official systems available when team materialization fails (strict=%s)', async (throwOnError) => {
     const context = {
       ...teamWorkspaceContext(),
       workspaceId: 'ws-team-offline',
@@ -485,13 +485,16 @@ describe('design-system Workspace scope', () => {
     });
     vi.stubGlobal('fetch', fetchMock);
 
-    await expect(fetchDesignSystemsResult(context)).resolves.toMatchObject({
+    await expect(fetchDesignSystems(context, { throwOnError })).resolves.toMatchObject([
+      expect.objectContaining({ id: 'user:local-brand' }),
+    ]);
+    await expect(fetchDesignSystemsResult(context, { throwOnError })).resolves.toMatchObject({
       ok: true,
       designSystems: [expect.objectContaining({
         id: 'user:local-brand',
       })],
     });
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledWith('/api/design-systems', expect.anything());
   });
 
   it('partitions team materialization when the Workspace changes', async () => {

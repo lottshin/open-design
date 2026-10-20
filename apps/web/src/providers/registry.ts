@@ -741,11 +741,10 @@ async function materializeTeamDesignSystems(
     };
     if (options?.forceTeamMaterialization) evictCoalescedGet(cacheKey);
     return await coalescedGet(cacheKey, readTeamIndex);
-  } catch (error) {
+  } catch {
     // Keep personal/built-in systems usable while the remote team index is
     // temporarily unavailable. The scoped catalog request below remains the
     // authority and still fails closed for an invalid Workspace identity.
-    if (options?.throwOnError) throw error;
     return new Set();
   }
 }

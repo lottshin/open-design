@@ -46,6 +46,19 @@ describe('navigation lifecycle from intent, not mount', () => {
     expect(navigationTiming.isCurrent(id)).toBe(true);
   });
 
+  it('keeps navigation bookkeeping usable when the reporter throws', () => {
+    const timing = createNavigationTiming({
+      now: () => 10,
+      id: () => 'nav-failed-reporter',
+      emit: () => { throw new Error('reporter unavailable'); },
+    });
+    const id = timing.begin(home, { projectId: 'a' });
+    timing.commit(id);
+    expect(timing.getSnapshot()?.routeCommitted).toBe(true);
+    timing.finish(id, 'ready');
+    expect(timing.getSnapshot()).toBeNull();
+  });
+
   it('includes async pre-route work and emits only one terminal result', () => {
     const { timing, events, at } = setup();
     const id = timing.begin(home, { projectId: 'a' });

@@ -4059,11 +4059,13 @@ function AppInner() {
     return { kind: 'resolved', name: authoritativeName };
   }, [rememberAuthoritativeProjectName]);
 
+  const projectOpenRequestRef = useRef(0);
   const openProjectForNavigation = useCallback(async (
     id: string,
     fileName?: string,
     projectTitleHint?: ProjectTitleHint,
     navigationId?: string,
+    openingStillCurrent?: () => boolean,
   ): Promise<boolean> => {
     const routeFileName = fileName ?? null;
     const hintedProjectName = projectTitleHint?.name.trim() || null;
@@ -4122,7 +4124,7 @@ function AppInner() {
       openingContext,
     );
     const openingScopeIsCurrent = () => {
-      if (navigationId && !navigationTiming.isCurrent(navigationId)) return false;
+      if (openingStillCurrent && !openingStillCurrent()) return false;
       if (currentWorkspaceAccountGeneration() !== openingAccountGeneration) return false;
       if (!pendingContextWitness) {
         return projectAuthorizationGenerationRef.current === openingAuthorizationGeneration
@@ -4300,6 +4302,9 @@ function AppInner() {
     projectTitleHint?: ProjectTitleHint,
   ): Promise<boolean> => {
     const source = routeRef.current;
+    const request = ++projectOpenRequestRef.current;
+    // Business request lifetime is independent of best-effort telemetry.
+    const openingStillCurrent = () => projectOpenRequestRef.current === request && routeRef.current === source;
     // Clicking an already-open project/file is not another project entry.
     if (source.kind === 'project' && source.projectId === id) {
       navigationTiming.cancel('superseded');
@@ -4309,7 +4314,7 @@ function AppInner() {
     const openingAuthorizationGeneration = projectAuthorizationGenerationRef.current;
     const navigationId = navigationTiming.begin(source, { projectId: id });
     try {
-      const opened = await openProjectForNavigation(id, fileName, projectTitleHint, navigationId);
+      const opened = await openProjectForNavigation(id, fileName, projectTitleHint, navigationId, openingStillCurrent);
       if (!opened) {
         if (currentWorkspaceAccountGeneration() !== openingAccountGeneration
           || projectAuthorizationGenerationRef.current !== openingAuthorizationGeneration) {

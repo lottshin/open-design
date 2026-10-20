@@ -2522,6 +2522,18 @@ describe('App project creation routing', () => {
     expect(projectEvents.map((event) => event?.status)).toEqual(['started', 'cancelled']);
   });
 
+  it('still opens the project when only its telemetry attempt is cancelled', async () => {
+    const lookup = deferred<Awaited<ReturnType<typeof getProject>>>();
+    mockedListProjects.mockResolvedValue([]);
+    mockedGetProject.mockReturnValue(lookup.promise);
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open missing project' }));
+    await waitFor(() => expect(mockedGetProject).toHaveBeenCalled());
+    act(() => navigationTiming.cancel('superseded'));
+    await act(async () => { lookup.resolve({ ...freshProject, id: 'project-missing' }); });
+    await waitFor(() => expect(window.location.pathname).toBe('/projects/project-missing'));
+  });
+
   it('gives repeated project clicks new ids and prevents the superseded lookup from navigating', async () => {
     const firstLookup = deferred<Awaited<ReturnType<typeof getProject>>>();
     mockedListProjects.mockResolvedValue([]);

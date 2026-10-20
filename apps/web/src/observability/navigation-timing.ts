@@ -66,7 +66,7 @@ export function createNavigationTiming(deps: {
   const listeners = new Set<() => void>();
   const notify = () => { for (const listener of listeners) listener(); };
   const emit = (attempt: NavigationAttempt, status: NavigationResult['status'], reason?: NavigationResult['reason']) => {
-    deps.emit({
+    try { deps.emit({
       navigation_id: attempt.id,
       started_at: attempt.startedAtIso,
       navigation_type: attempt.navigationType,
@@ -76,7 +76,7 @@ export function createNavigationTiming(deps: {
       status,
       duration_ms: status === 'started' ? 0 : Math.max(0, Math.round(deps.now() - attempt.startedAt)),
       ...(reason ? { reason } : {}),
-    });
+    }); } catch { /* Reporting failures must not interrupt navigation. */ }
   };
   const finish = (id: string, status: 'ready' | 'cancelled' | 'failed', reason?: NavigationResult['reason']) => {
     if (!active || active.id !== id || (status === 'ready' && !active.routeCommitted)) return;
